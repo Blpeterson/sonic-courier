@@ -1,0 +1,1 @@
+"""Sonic Courier test suite."""

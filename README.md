@@ -1,5 +1,7 @@
 # Sonic Courier 📡🎵
 
+[![Tests](https://github.com/Blpeterson/sonic-courier/actions/workflows/tests.yml/badge.svg)](https://github.com/Blpeterson/sonic-courier/actions/workflows/tests.yml)
+
 Send any file through the air as near-ultrasonic sound. Sonic Courier maps each
 4-bit nibble to one of 16 tones between 17.25 and 21 kHz, using 17 and 21.25 kHz
 reference tones to calibrate the receiver dynamically.
@@ -16,45 +18,198 @@ reference tones to calibrate the receiver dynamically.
 - Deterministic WAV encoding/decoding plus optional live speaker/microphone I/O
 - Click-reduced tones, leading-silence detection, and actionable decode errors
 
-## Install
+## Windows quick start (actual `.exe`)
 
-Python 3.10 or newer is required.
+These are complete PowerShell commands. They create an isolated environment and
+install a real launcher at `.venv\Scripts\sonic-courier.exe`; you do **not** run
+the `sonic_courier` source folder.
 
-```bash
-python -m pip install .
+### 1. Install Python once
+
+Check whether Python 3.10 or newer is installed:
+
+```powershell
+py --version
 ```
 
-For live speaker and microphone support, install the PortAudio-backed extra:
+If that command is not found, install Python 3.12 and then open a new PowerShell
+window:
 
-```bash
-python -m pip install ".[live]"
+```powershell
+winget install --exact --id Python.Python.3.12
 ```
 
-PyAudio may require PortAudio development packages on Linux (`portaudio19-dev`)
-or Homebrew (`brew install portaudio`) before installation.
+### 2. Download and install Sonic Courier
 
-## Use
-
-First verify the codec without acoustic hardware:
-
-```bash
-sonic-courier encode photo.jpg -o transmission.wav
-sonic-courier decode transmission.wav -o received/
+```powershell
+git clone https://github.com/Blpeterson/sonic-courier.git
+cd sonic-courier
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install ".[live]"
 ```
 
-To transmit through speakers and receive from a microphone, start the listener
-first and then send from a second computer or terminal:
+The last command installs Sonic Courier, NumPy, PyAudio, and the Windows
+`sonic-courier.exe` command inside the virtual environment.
 
-```bash
-# Receiver
-sonic-courier listen -o received/
+### 3. Prove the installation is ready
 
-# Sender
-sonic-courier send photo.jpg --save transmission.wav
+```powershell
+.\.venv\Scripts\sonic-courier.exe --version
+.\.venv\Scripts\sonic-courier.exe doctor
 ```
 
-The receiver refuses to write corrupt output when the frame is truncated or its
-CRC-32 does not match.
+A correct setup ends with `Live audio: READY` and lists a default microphone and
+speaker. You can see the exact executable Windows will run with:
+
+```powershell
+Get-Item .\.venv\Scripts\sonic-courier.exe
+```
+
+If `doctor` says PyAudio is missing, rerun the `pip install ".[live]"` command.
+If it shows `Default input: NONE` or `Default output: NONE`, connect or enable a
+microphone/speaker in Windows Sound settings and run `doctor` again.
+
+### 4. Verify a file round trip without speakers
+
+This creates a test file, turns it into audio, decodes it, and proves that the
+original and recovered SHA-256 hashes match:
+
+```powershell
+Set-Content -NoNewline -Path .\hello.txt -Value "Hello from Sonic Courier!"
+.\.venv\Scripts\sonic-courier.exe encode .\hello.txt -o .\hello.wav
+.\.venv\Scripts\sonic-courier.exe decode .\hello.wav -o .\received
+Get-FileHash .\hello.txt
+Get-FileHash .\received\hello.txt
+```
+
+Both hashes must be identical. This verifies the codec and file-integrity path
+without depending on the ultrasonic capabilities of your hardware.
+
+## Linux quick start
+
+Linux does not use `.exe` extensions. The installation creates an executable
+launcher at `.venv/bin/sonic-courier`.
+
+### 1. Install system prerequisites
+
+Ubuntu, Debian, Linux Mint, and Raspberry Pi OS:
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip portaudio19-dev
+```
+
+Fedora:
+
+```bash
+sudo dnf install -y git python3 python3-devel portaudio-devel gcc
+```
+
+Arch Linux and Manjaro:
+
+```bash
+sudo pacman -S --needed git python python-pip portaudio base-devel
+```
+
+### 2. Download and install Sonic Courier
+
+```bash
+git clone https://github.com/Blpeterson/sonic-courier.git
+cd sonic-courier
+python3 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install ".[live]"
+```
+
+### 3. Prove the Linux installation is ready
+
+```bash
+./.venv/bin/sonic-courier --version
+./.venv/bin/sonic-courier doctor
+command -v "$PWD/.venv/bin/sonic-courier"
+```
+
+`doctor` should end with `Live audio: READY`. On a headless machine or inside a
+container it can report no default devices even though WAV encoding and decoding
+work correctly. On a desktop, check that PipeWire or PulseAudio sees the devices:
+
+```bash
+wpctl status 2>/dev/null || pactl info
+```
+
+If PyAudio fails to build, confirm that the PortAudio development package from
+step 1 is installed, then rerun the `pip install ".[live]"` command.
+
+### 4. Verify a Linux file round trip
+
+```bash
+printf %s "Hello from Sonic Courier!" > hello.txt
+./.venv/bin/sonic-courier encode ./hello.txt -o ./hello.wav
+./.venv/bin/sonic-courier decode ./hello.wav -o ./received
+sha256sum ./hello.txt ./received/hello.txt
+```
+
+The two SHA-256 hashes must be identical.
+
+## Send a real file through the air
+
+Use two computers for the clearest test. Install Sonic Courier on both, put them
+close together, start at low speaker volume, and disable noise suppression or
+"audio enhancements" if possible.
+
+On the **receiving computer**, open a terminal in the cloned repository and run
+the command for its operating system.
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\sonic-courier.exe listen -o .\received --timeout 60
+```
+
+Linux:
+
+```bash
+./.venv/bin/sonic-courier listen -o ./received --timeout 60
+```
+
+Leave that window listening. On the **sending computer**, run the matching
+command.
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\sonic-courier.exe send .\photo.jpg --save .\photo-transmission.wav
+```
+
+Linux:
+
+```bash
+./.venv/bin/sonic-courier send ./photo.jpg --save ./photo-transmission.wav
+```
+
+The sender plays the transmission and also saves the exact WAV for debugging.
+The receiver writes `received\photo.jpg` only after its length and CRC-32 pass.
+
+Start with a tiny text file: throughput is about 12.5 bytes per second, and many
+consumer speakers/microphones filter frequencies above 17 kHz. A successful WAV
+test with a failed over-the-air test usually means the hardware or operating
+system audio processing is filtering the signal—not that the installation is
+broken.
+
+## Command alternative
+
+Every command also works through the virtual environment's Python if a launcher
+is unavailable:
+
+```bash
+./.venv/bin/python -m sonic_courier doctor
+./.venv/bin/python -m sonic_courier encode photo.jpg -o transmission.wav
+./.venv/bin/python -m sonic_courier decode transmission.wav -o received
+```
+
+`python -m sonic_courier` asks Python to run the installed package; it is an
+alternative entry point, not an instruction to execute a folder.
 
 ## Protocol
 

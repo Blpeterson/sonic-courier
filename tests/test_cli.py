@@ -2,10 +2,34 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
+
+from sonic_courier.cli import main
+from sonic_courier.live import AudioDeviceSummary, LiveAudioError
 
 
 class CliTests(unittest.TestCase):
+    @patch("sonic_courier.cli.inspect_devices")
+    def test_doctor_reports_ready(self, inspect_devices):
+        inspect_devices.return_value = AudioDeviceSummary(4, 2, 2, "Test Mic", "Test Speaker")
+        output = StringIO()
+        with redirect_stdout(output):
+            result = main(["doctor"])
+        self.assertEqual(result, 0)
+        self.assertIn("Live audio: READY", output.getvalue())
+        self.assertIn("Test Mic", output.getvalue())
+
+    @patch("sonic_courier.cli.inspect_devices", side_effect=LiveAudioError("PyAudio missing"))
+    def test_doctor_reports_missing_live_support(self, _inspect_devices):
+        output = StringIO()
+        with redirect_stdout(output):
+            result = main(["doctor"])
+        self.assertEqual(result, 1)
+        self.assertIn("Live audio: NOT READY", output.getvalue())
+
     def test_wav_end_to_end(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

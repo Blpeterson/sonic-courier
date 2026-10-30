@@ -6,9 +6,11 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+
 from . import __version__
 from .audio import read_wav, write_wav
-from .live import LiveAudioError, play, record_transmission
+from .live import LiveAudioError, inspect_devices, play, record_transmission
 from .protocol import ProtocolError, build_frame, demodulate, modulate
 
 
@@ -27,6 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
+
+    commands.add_parser("doctor", help="verify the installation and live audio devices")
 
     encode = commands.add_parser("encode", help="encode a file as a PCM WAV transmission")
     encode.add_argument("input", type=Path, help="file to transmit")
@@ -57,6 +61,27 @@ def _encode(path: Path):
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "doctor":
+            print(f"Sonic Courier: {__version__} [OK]")
+            print(f"Python: {sys.version.split()[0]} [OK]")
+            print(f"NumPy: {np.__version__} [OK]")
+            try:
+                devices = inspect_devices()
+            except LiveAudioError as exc:
+                print(f"Live audio: NOT READY ({exc})")
+                print("Install it with: python -m pip install '.[live]'")
+                return 1
+            print(f"PyAudio/PortAudio: {devices.total} devices [OK]")
+            print(f"Input devices: {devices.inputs}")
+            print(f"Output devices: {devices.outputs}")
+            print(f"Default input: {devices.default_input or 'NONE'}")
+            print(f"Default output: {devices.default_output or 'NONE'}")
+            if not devices.inputs or not devices.outputs:
+                print("Live audio: NOT READY (an input and output device are both required)")
+                return 1
+            print("Live audio: READY")
+            return 0
+
         if args.command in {"encode", "send"}:
             samples, size = _encode(args.input)
             destination = args.output if args.command == "encode" else args.save

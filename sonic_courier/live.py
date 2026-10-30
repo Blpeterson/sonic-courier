@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
@@ -14,6 +15,17 @@ class LiveAudioError(RuntimeError):
     """Raised when live audio support is unavailable or fails."""
 
 
+@dataclass(frozen=True)
+class AudioDeviceSummary:
+    """A compact inventory used by the setup diagnostics command."""
+
+    total: int
+    inputs: int
+    outputs: int
+    default_input: str | None
+    default_output: str | None
+
+
 def _pyaudio():
     try:
         import pyaudio  # type: ignore[import-not-found]
@@ -22,6 +34,30 @@ def _pyaudio():
             "PyAudio is required for live sound. Install with: pip install 'sonic-courier[live]'"
         ) from exc
     return pyaudio
+
+
+def inspect_devices() -> AudioDeviceSummary:
+    """Inspect PortAudio without playing or recording any sound."""
+    pyaudio = _pyaudio()
+    audio = pyaudio.PyAudio()
+    try:
+        total = audio.get_device_count()
+        devices = [audio.get_device_info_by_index(index) for index in range(total)]
+        inputs = sum(int(device.get("maxInputChannels", 0)) > 0 for device in devices)
+        outputs = sum(int(device.get("maxOutputChannels", 0)) > 0 for device in devices)
+        try:
+            default_input = str(audio.get_default_input_device_info()["name"])
+        except OSError:
+            default_input = None
+        try:
+            default_output = str(audio.get_default_output_device_info()["name"])
+        except OSError:
+            default_output = None
+        return AudioDeviceSummary(total, inputs, outputs, default_input, default_output)
+    except Exception as exc:
+        raise LiveAudioError(f"audio device inspection failed: {exc}") from exc
+    finally:
+        audio.terminate()
 
 
 def play(samples: NDArray[np.int16], sample_rate: int = SAMPLE_RATE) -> None:

@@ -8,7 +8,13 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from .audio import BASE_FREQUENCY, SAMPLE_RATE, find_dominant_frequency
+from .audio import (
+    SAMPLE_RATE,
+    TONE_PROFILES,
+    ToneProfile,
+    find_dominant_frequency,
+    match_tone_profile,
+)
 
 
 class LiveAudioError(RuntimeError):
@@ -92,10 +98,15 @@ def record_transmission(
     captured: list[NDArray[np.int16]] = []
     rolling: list[NDArray[np.int16]] = []
     started = False
+    active_profile: ToneProfile | None = None
     silent_chunks = 0
     max_wait_chunks = round(timeout * sample_rate / chunk_size)
     required_silence = round(silence_duration * sample_rate / chunk_size)
-    status("Listening for the 17 kHz calibration tone...")
+    profile_labels = " or ".join(
+        f"{profile.base_frequency / 1000:g} kHz ({profile.name})"
+        for profile in TONE_PROFILES.values()
+    )
+    status(f"Listening for a calibration tone at {profile_labels}...")
     try:
         stream = audio.open(
             format=pyaudio.paInt16,
@@ -116,15 +127,25 @@ def record_transmission(
                 rolling = rolling[-5:]
                 peak = find_dominant_frequency(chunk, sample_rate)
                 rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
-                if rms > 150 and BASE_FREQUENCY - 500 <= peak <= BASE_FREQUENCY + 500:
+                detected_profile = match_tone_profile(peak, tolerance=600.0)
+                if rms > 150 and detected_profile is not None:
                     started = True
+                    active_profile = detected_profile
                     captured.extend(rolling)
-                    status("Preamble detected; receiving...")
+                    status(f"Preamble detected ({active_profile.name}); receiving...")
                 continue
             captured.append(chunk)
             peak = find_dominant_frequency(chunk, sample_rate)
             rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
-            in_band = 16_500 <= peak <= 21_700 and rms > 150
+            if active_profile is None:  # Defensive: started and profile are set together above.
+                raise LiveAudioError("internal error: transmission profile was not detected")
+            margin = max(500.0, active_profile.step_frequency * 2.0)
+            in_band = (
+                active_profile.base_frequency - margin
+                <= peak
+                <= active_profile.high_preamble_frequency + margin
+                and rms > 150
+            )
             silent_chunks = 0 if in_band else silent_chunks + 1
             if silent_chunks >= required_silence:
                 break

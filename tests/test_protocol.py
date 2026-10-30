@@ -2,7 +2,15 @@ import unittest
 
 import numpy as np
 
-from sonic_courier.audio import SAMPLE_RATE
+from sonic_courier.audio import (
+    COMPATIBLE_PROFILE,
+    DEFAULT_TONE_PROFILE,
+    PREAMBLE_DURATION,
+    SAMPLE_RATE,
+    SYMBOL_DURATION,
+    ULTRASONIC_PROFILE,
+    find_dominant_frequency,
+)
 from sonic_courier.protocol import (
     HEADER,
     ProtocolError,
@@ -16,6 +24,58 @@ from sonic_courier.protocol import (
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_default_profile_uses_microphone_compatible_band(self):
+        frame = b"\x0f"
+        np.testing.assert_array_equal(
+            modulate(frame),
+            modulate(frame, profile=COMPATIBLE_PROFILE),
+        )
+        self.assertIs(DEFAULT_TONE_PROFILE, COMPATIBLE_PROFILE)
+
+    def test_each_profile_emits_its_exact_calibration_and_data_frequencies(self):
+        preamble_samples = round(SAMPLE_RATE * PREAMBLE_DURATION)
+        symbol_samples = round(SAMPLE_RATE * SYMBOL_DURATION)
+        profiles = (
+            (COMPATIBLE_PROFILE, 12_000.0, 200.0),
+            (ULTRASONIC_PROFILE, 17_000.0, 250.0),
+        )
+        for profile, base, step in profiles:
+            with self.subTest(profile=profile):
+                signal = modulate(b"\x0f", profile=profile)
+                chunks = (
+                    signal[:preamble_samples],
+                    signal[preamble_samples : 2 * preamble_samples],
+                    signal[2 * preamble_samples : 2 * preamble_samples + symbol_samples],
+                    signal[
+                        2 * preamble_samples + symbol_samples :
+                        2 * preamble_samples + 2 * symbol_samples
+                    ],
+                )
+                expected = (base, base + 17 * step, base + step, base + 16 * step)
+                actual = tuple(find_dominant_frequency(chunk) for chunk in chunks)
+                for measured, frequency in zip(actual, expected, strict=True):
+                    self.assertAlmostEqual(measured, frequency, delta=2.0)
+                self.assertLess(expected[1], SAMPLE_RATE / 2)
+
+    def test_ultrasonic_profile_remains_auto_decodable(self):
+        data = b"legacy ultrasonic recording"
+        signal = modulate(
+            build_frame(data, "legacy.bin"),
+            profile=ULTRASONIC_PROFILE,
+        )
+        result = demodulate(signal)
+        self.assertEqual((result.filename, result.data), ("legacy.bin", data))
+        self.assertAlmostEqual(result.measured_low, 17_000.0, delta=2.0)
+        self.assertAlmostEqual(result.measured_high, 21_250.0, delta=2.0)
+
+    def test_profile_must_fit_below_sample_rate_nyquist_limit(self):
+        with self.assertRaisesRegex(ValueError, "Nyquist|sample rate"):
+            modulate(b"\x00", sample_rate=32_000, profile=ULTRASONIC_PROFILE)
+
+    def test_unknown_profile_name_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unknown tone profile"):
+            modulate(b"\x00", profile="missing")
+
     def test_nibble_conversion_all_values(self):
         data = bytes(range(256))
         self.assertEqual(nibbles_to_bytes(bytes_to_nibbles(data)), data)

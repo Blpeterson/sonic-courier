@@ -21,6 +21,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("Live audio: READY", output.getvalue())
         self.assertIn("Test Mic", output.getvalue())
+        self.assertIn("12.2-15.2 kHz (compatible)", output.getvalue())
 
     @patch("sonic_courier.cli.inspect_devices", side_effect=LiveAudioError("PyAudio missing"))
     def test_doctor_reports_missing_live_support(self, _inspect_devices):
@@ -44,6 +45,7 @@ class CliTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(encoded.returncode, 0, encoded.stderr)
+            self.assertIn("compatible profile", encoded.stdout)
             decoded = subprocess.run(
                 [sys.executable, "-m", "sonic_courier", "decode", str(wav), "-o", str(recovered)],
                 capture_output=True,
@@ -51,6 +53,49 @@ class CliTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(decoded.returncode, 0, decoded.stderr)
+            self.assertEqual(recovered.read_bytes(), source.read_bytes())
+
+    def test_ultrasonic_profile_wav_remains_cli_compatible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "legacy.bin"
+            wav = root / "legacy.wav"
+            recovered = root / "recovered.bin"
+            source.write_bytes(b"legacy profile")
+            encoded = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "sonic_courier",
+                    "encode",
+                    str(source),
+                    "-o",
+                    str(wav),
+                    "--profile",
+                    "ultrasonic",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(encoded.returncode, 0, encoded.stderr)
+            self.assertIn("ultrasonic profile", encoded.stdout)
+            decoded = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "sonic_courier",
+                    "decode",
+                    str(wav),
+                    "-o",
+                    str(recovered),
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(decoded.returncode, 0, decoded.stderr)
+            self.assertIn("17000.0/21250.0 Hz", decoded.stdout)
             self.assertEqual(recovered.read_bytes(), source.read_bytes())
 
     def test_missing_input_returns_error(self):

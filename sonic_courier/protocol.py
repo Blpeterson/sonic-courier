@@ -11,14 +11,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .audio import (
-    BASE_FREQUENCY,
-    HIGH_PREAMBLE_FREQUENCY,
+    DEFAULT_TONE_PROFILE,
     PREAMBLE_DURATION,
     SAMPLE_RATE,
-    STEP_FREQUENCY,
     SYMBOL_DURATION,
+    ToneProfile,
     find_dominant_frequency,
     generate_sine_wave,
+    match_tone_profile,
+    resolve_tone_profile,
 )
 
 MAGIC = b"SC01"
@@ -83,24 +84,39 @@ def bytes_to_nibbles(data: bytes) -> list[int]:
 
 
 def nibbles_to_bytes(nibbles: list[int]) -> bytes:
-    return bytes((nibbles[index] << 4) | nibbles[index + 1] for index in range(0, len(nibbles) - 1, 2))
+    return bytes(
+        (nibbles[index] << 4) | nibbles[index + 1]
+        for index in range(0, len(nibbles) - 1, 2)
+    )
 
 
-def modulate(frame: bytes, sample_rate: int = SAMPLE_RATE) -> NDArray[np.int16]:
+def modulate(
+    frame: bytes,
+    sample_rate: int = SAMPLE_RATE,
+    *,
+    profile: str | ToneProfile = DEFAULT_TONE_PROFILE,
+) -> NDArray[np.int16]:
     """Modulate a frame with a LOW/HIGH calibration preamble and 16 FSK tones."""
+    tone_profile = resolve_tone_profile(profile)
     parts = [
-        generate_sine_wave(BASE_FREQUENCY, PREAMBLE_DURATION, sample_rate),
-        generate_sine_wave(HIGH_PREAMBLE_FREQUENCY, PREAMBLE_DURATION, sample_rate),
+        generate_sine_wave(tone_profile.base_frequency, PREAMBLE_DURATION, sample_rate),
+        generate_sine_wave(tone_profile.high_preamble_frequency, PREAMBLE_DURATION, sample_rate),
     ]
     parts.extend(
-        generate_sine_wave(BASE_FREQUENCY + (nibble + 1) * STEP_FREQUENCY, SYMBOL_DURATION, sample_rate)
+        generate_sine_wave(
+            tone_profile.base_frequency + (nibble + 1) * tone_profile.step_frequency,
+            SYMBOL_DURATION,
+            sample_rate,
+        )
         for nibble in bytes_to_nibbles(frame)
     )
     return np.concatenate(parts)
 
 
-def _find_transmission_start(samples: NDArray[np.int16], sample_rate: int) -> int:
-    """Find the first sustained near-ultrasonic tone, ignoring leading silence/noise."""
+def _find_transmission_start(
+    samples: NDArray[np.int16], sample_rate: int
+) -> tuple[int, ToneProfile]:
+    """Find a supported LOW preamble, ignoring leading silence and noise."""
     window_size = max(128, round(sample_rate * 0.020))
     hop = max(1, window_size // 2)
     upper = min(samples.size - window_size + 1, round(sample_rate * 30.0))
@@ -109,14 +125,16 @@ def _find_transmission_start(samples: NDArray[np.int16], sample_rate: int) -> in
         if np.sqrt(np.mean(chunk.astype(np.float64) ** 2)) < 150.0:
             continue
         peak = find_dominant_frequency(chunk, sample_rate)
-        if BASE_FREQUENCY - 600 <= peak <= BASE_FREQUENCY + 600:
+        profile = match_tone_profile(peak)
+        if profile is not None:
             # Refine onset using a short-time RMS threshold around this candidate.
             search_start = max(0, offset - window_size)
             absolute = np.abs(samples[search_start : offset + window_size].astype(np.int32))
             threshold = max(100, int(np.max(absolute) * 0.03))
             hits = np.flatnonzero(absolute >= threshold)
-            return search_start + int(hits[0]) if hits.size else offset
-    raise ProtocolError("no 17 kHz calibration preamble found")
+            start = search_start + int(hits[0]) if hits.size else offset
+            return start, profile
+    raise ProtocolError("no supported calibration preamble found (expected 12 kHz or 17 kHz)")
 
 
 def _calibration_frequency(
@@ -135,24 +153,26 @@ def demodulate(samples: NDArray[np.int16], sample_rate: int = SAMPLE_RATE) -> De
     mono = np.asarray(samples, dtype=np.int16)
     if mono.ndim != 1:
         raise ValueError("samples must be mono")
-    start = _find_transmission_start(mono, sample_rate)
+    start, profile = _find_transmission_start(mono, sample_rate)
     nominal_preamble_samples = sample_rate * PREAMBLE_DURATION
     nominal_symbol_samples = sample_rate * SYMBOL_DURATION
     f_low = _calibration_frequency(mono, start, PREAMBLE_DURATION, sample_rate)
-    if not 16_000 <= f_low <= 18_000:
+    if abs(f_low - profile.base_frequency) > 600.0:
         raise ProtocolError(f"invalid LOW calibration frequency: {f_low:.1f} Hz")
     # Sample-clock mismatch shifts both pitch and tone duration by reciprocal
     # factors. Deriving timing from LOW keeps long frames aligned under drift.
-    timing_scale = BASE_FREQUENCY / f_low
+    timing_scale = profile.base_frequency / f_low
     preamble_samples = nominal_preamble_samples * timing_scale
     symbol_samples = nominal_symbol_samples * timing_scale
     f_high = _calibration_frequency(
         mono, start + round(preamble_samples), PREAMBLE_DURATION * timing_scale, sample_rate
     )
-    if not 20_000 <= f_high <= min(22_000, sample_rate / 2):
+    expected_high = profile.high_preamble_frequency / timing_scale
+    if f_high >= sample_rate / 2 or abs(f_high - expected_high) > 600.0:
         raise ProtocolError(f"invalid HIGH calibration frequency: {f_high:.1f} Hz")
     step = (f_high - f_low) / 17.0
-    if not 180 <= step <= 320:
+    expected_step = profile.step_frequency / timing_scale
+    if not expected_step * 0.72 <= step <= expected_step * 1.28:
         raise ProtocolError(f"invalid measured channel spacing: {step:.1f} Hz")
 
     payload_start = start + 2 * preamble_samples
@@ -180,7 +200,9 @@ def demodulate(samples: NDArray[np.int16], sample_rate: int = SAMPLE_RATE) -> De
             partial = nibbles_to_bytes(nibbles)
             magic, length, _checksum, name_length = HEADER.unpack_from(partial)
             if magic != MAGIC:
-                raise ProtocolError("frame magic mismatch; symbol timing or calibration may be wrong")
+                raise ProtocolError(
+                    "frame magic mismatch; symbol timing or calibration may be wrong"
+                )
             if length > MAX_PAYLOAD_BYTES or name_length > MAX_FILENAME_BYTES:
                 raise ProtocolError("invalid frame length fields")
             expected_symbols = 2 * (HEADER.size + name_length + length)

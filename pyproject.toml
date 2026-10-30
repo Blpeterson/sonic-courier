@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sonic-courier"
 version = "1.0.1"
-description = "Send files through near-ultrasonic audio using relative 16-tone FSK."
+description = "Send files through high-frequency audio using relative 16-tone FSK."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

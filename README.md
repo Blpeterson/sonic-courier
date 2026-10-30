@@ -2,17 +2,21 @@
 
 [![Tests](https://github.com/Blpeterson/sonic-courier/actions/workflows/tests.yml/badge.svg)](https://github.com/Blpeterson/sonic-courier/actions/workflows/tests.yml)
 
-Send any file through the air as near-ultrasonic sound. Sonic Courier maps each
-4-bit nibble to one of 16 tones between 17.25 and 21 kHz, using 17 and 21.25 kHz
-reference tones to calibrate the receiver dynamically.
+Send any file through the air as high-frequency sound. The default compatibility
+profile maps each 4-bit nibble to one of 16 tones between 12.2 and 15.2 kHz,
+using 12 and 15.4 kHz reference tones to calibrate the receiver dynamically.
+The original 17.25-21 kHz ultrasonic profile remains available when the hardware
+supports it.
 
 > **Experimental:** many laptop/phone speakers, microphones, audio codecs, and
-> noise-cancellation systems attenuate frequencies above 17 kHz. Start with the
-> WAV round trip, keep devices close, and never use high playback volume.
+> noise-cancellation systems attenuate high frequencies. The compatibility
+> profile is more audible than the ultrasonic profile. Start with the WAV round
+> trip, keep devices close, and never use high playback volume.
 
 ## What it includes
 
 - Relative 16-tone FSK at about 100 bit/s (12.5 bytes/s)
+- Microphone-friendly compatibility tones with automatic legacy-profile receive
 - Dynamic calibration for speaker/microphone clock and pitch variation
 - Framed transfers with filename, payload length, and CRC-32 integrity checking
 - Deterministic WAV encoding/decoding plus optional live speaker/microphone I/O
@@ -32,8 +36,14 @@ Check whether Python 3.10 or newer is installed:
 py --version
 ```
 
-If that command is not found, install Python 3.12 and then open a new PowerShell
-window:
+If `py` is not found, try the Microsoft Store command instead:
+
+```powershell
+python3 --version
+```
+
+If neither command reports Python 3.10 or newer, install Python 3.12 and then
+open a new PowerShell window:
 
 ```powershell
 winget install --exact --id Python.Python.3.12
@@ -41,12 +51,46 @@ winget install --exact --id Python.Python.3.12
 
 ### 2. Download and install Sonic Courier
 
+For a fresh clone:
+
 ```powershell
 git clone https://github.com/Blpeterson/sonic-courier.git
-cd sonic-courier
+cd .\sonic-courier
+```
+
+If you already downloaded or opened the project, skip those two commands. Run
+the remaining commands from the repository root: the folder containing both
+`pyproject.toml` and the `sonic_courier` source folder. Do **not** change into
+the `sonic_courier` source folder. Confirm that you are in the right place:
+
+```powershell
+Get-Item .\pyproject.toml
+```
+
+Then create the environment and install the program:
+
+```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install ".[live]"
+```
+
+If `py` is unavailable but `python3 --version` worked, use this first command
+instead, then run the same two `pip` commands:
+
+```powershell
+python3 -m venv .venv
+```
+
+If an existing environment was previously created by a different Python
+version, rebuild it instead of creating over it. For example, an error that
+reports Python 3.11 but names compiled files containing `cp312` means Python
+3.12 packages were left in the environment. Clear and reinstall it with:
+
+```powershell
+python3 -m venv --clear .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install --no-cache-dir ".[live]"
 ```
 
 The last command installs Sonic Courier, NumPy, PyAudio, and the Windows
@@ -218,12 +262,16 @@ Linux:
 
 The sender plays the transmission and also saves the exact WAV for debugging.
 The receiver writes `received\photo.jpg` only after its length and CRC-32 pass.
+Encoding and sending use the `compatible` profile by default. To use the original
+near-ultrasonic band on capable hardware, add `--profile ultrasonic` to either
+the `encode` or `send` command. The decoder and live listener detect both
+profiles automatically, so the receiving command does not need a profile flag.
 
 Start with a tiny text file: throughput is about 12.5 bytes per second, and many
-consumer speakers/microphones filter frequencies above 17 kHz. A successful WAV
-test with a failed over-the-air test usually means the hardware or operating
-system audio processing is filtering the signal—not that the installation is
-broken.
+consumer speakers, microphones, and voice-processing modes filter high
+frequencies. A successful WAV test with a failed over-the-air test usually means
+the hardware or operating system audio processing is filtering the signal—not
+that the installation is broken.
 
 ## Command alternative
 
@@ -241,11 +289,15 @@ alternative entry point, not an instruction to execute a folder.
 
 ## Protocol
 
-| Signal | Frequency | Duration |
-|---|---:|---:|
-| Calibration LOW | 17,000 Hz | 100 ms |
-| Calibration HIGH | 21,250 Hz | 100 ms |
-| Nibble `0x0`–`0xF` | 17,250–21,000 Hz in 250 Hz steps | 40 ms |
+| Profile | Calibration LOW | Data tones (`0x0`-`0xF`) | Calibration HIGH |
+|---|---:|---:|---:|
+| `compatible` (default) | 12,000 Hz | 12,200-15,200 Hz, 200 Hz steps | 15,400 Hz |
+| `ultrasonic` (legacy) | 17,000 Hz | 17,250-21,000 Hz, 250 Hz steps | 21,250 Hz |
+
+Both calibration tones last 100 ms and every data tone lasts 40 ms. The default
+profile keeps 6.65 kHz of headroom below the 22.05 kHz Nyquist limit at the
+44.1 kHz sample rate; the legacy HIGH tone has only 800 Hz of headroom and is
+therefore much more vulnerable to anti-alias filters.
 
 The measured step is `(HIGH - LOW) / 17`. A received data tone is mapped with
 `round((peak - LOW) / step) - 1`. Every pair of symbols reconstructs one byte.

@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sonic-courier"
-version = "1.0.0"
+version = "1.0.1"
 description = "Send files through near-ultrasonic audio using relative 16-tone FSK."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Brack Peterson" }]
-dependencies = ["numpy>=1.24"]
+# NumPy 2.4 raised its x86 wheel baseline to x86-64-v2. Keeping the older
+# baseline avoids SIGILL on pre-2009 CPUs and virtual machines that expose a
+# legacy x86-64 feature set.
+dependencies = ["numpy>=1.24,<2.4"]
 keywords = ["audio", "data-transfer", "fsk", "ultrasonic", "modem"]
 classifiers = [
   "Development Status :: 4 - Beta",

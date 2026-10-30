@@ -141,6 +141,34 @@ wpctl status 2>/dev/null || pactl info
 If PyAudio fails to build, confirm that the PortAudio development package from
 step 1 is installed, then rerun the `pip install ".[live]"` command.
 
+### Fix `Illegal instruction` on an existing Linux installation
+
+NumPy 2.4 raised its minimum x86 CPU requirement. Older physical CPUs and some
+virtual machines exit immediately with `Illegal instruction` when that build is
+imported. This includes Core 2-era systems such as the Lenovo ThinkPad X61.
+Sonic Courier 1.0.1 pins NumPy below that incompatible boundary.
+
+From inside the cloned `sonic-courier` directory, repair an existing virtual
+environment with:
+
+```bash
+git pull
+./.venv/bin/python -m pip install --upgrade --force-reinstall "numpy<2.4" ".[live]"
+./.venv/bin/sonic-courier --version
+./.venv/bin/sonic-courier doctor
+```
+
+The version command should print `sonic-courier 1.0.1`. To confirm the repaired
+NumPy version without starting Sonic Courier:
+
+```bash
+./.venv/bin/python -c 'import numpy; print(numpy.__version__)'
+```
+
+It must print a version lower than `2.4`. If that Python command itself still
+exits with `Illegal instruction`, the virtual environment did not replace the
+old wheel; remove and recreate `.venv` using the installation steps above.
+
 ### 4. Verify a Linux file round trip
 
 ```bash

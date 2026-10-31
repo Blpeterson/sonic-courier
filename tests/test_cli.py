@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from sonic_courier.cli import main
 from sonic_courier.live import AudioDeviceSummary, LiveAudioError
+from sonic_courier.protocol import build_frame, modulate
 
 
 class CliTests(unittest.TestCase):
@@ -97,6 +98,49 @@ class CliTests(unittest.TestCase):
             self.assertEqual(decoded.returncode, 0, decoded.stderr)
             self.assertIn("17000.0/21250.0 Hz", decoded.stdout)
             self.assertEqual(recovered.read_bytes(), source.read_bytes())
+
+    @patch("sonic_courier.cli.record_transmission")
+    def test_listen_can_write_an_exact_extensionless_filename(self, record_transmission):
+        record_transmission.return_value = modulate(build_frame(b"received", "original.bin"))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "chosen-name"
+            result = main(["listen", "--output-file", str(output), "--timeout", "1"])
+
+            self.assertEqual(result, 0)
+            self.assertTrue(output.is_file())
+            self.assertEqual(output.read_bytes(), b"received")
+
+    def test_confirmed_send_encodes_before_playing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "tiny.bin"
+            source.write_bytes(b"x")
+            output = StringIO()
+            with (
+                patch("builtins.input", return_value="yes"),
+                patch("sonic_courier.cli.play") as play,
+                redirect_stdout(output),
+            ):
+                result = main(["send", str(source), "--confirm"])
+
+            self.assertEqual(result, 0)
+            self.assertIn("Encoded 1 bytes", output.getvalue())
+            play.assert_called_once()
+
+    def test_declined_send_does_not_play(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "tiny.bin"
+            source.write_bytes(b"x")
+            output = StringIO()
+            with (
+                patch("builtins.input", return_value="n"),
+                patch("sonic_courier.cli.play") as play,
+                redirect_stdout(output),
+            ):
+                result = main(["send", str(source), "--confirm"])
+
+            self.assertEqual(result, 0)
+            self.assertIn("Playback cancelled", output.getvalue())
+            play.assert_not_called()
 
     def test_missing_input_returns_error(self):
         result = subprocess.run(

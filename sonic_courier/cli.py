@@ -21,7 +21,10 @@ from .live import LiveAudioError, inspect_devices, play, record_transmission
 from .protocol import ProtocolError, build_frame, demodulate, modulate
 
 
-def _safe_output(base: Path, filename: str) -> Path:
+def _safe_output(base: Path, filename: str, *, exact: bool = False) -> Path:
+    if exact:
+        base.parent.mkdir(parents=True, exist_ok=True)
+        return base
     if base.exists() and base.is_dir() or not base.suffix:
         base.mkdir(parents=True, exist_ok=True)
         return base / Path(filename).name
@@ -59,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TONE_PROFILE.name,
         help="tone range to use (default: %(default)s)",
     )
+    send.add_argument(
+        "--confirm",
+        action="store_true",
+        help="encode first, then ask before playing sound",
+    )
 
     decode = commands.add_parser("decode", help="decode a transmission WAV")
     decode.add_argument("input", type=Path, help="16-bit PCM WAV to decode")
@@ -66,6 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     listen = commands.add_parser("listen", help="receive one transmission from the microphone")
     listen.add_argument("-o", "--output", type=Path, default=Path("received"))
+    listen.add_argument(
+        "--output-file",
+        type=Path,
+        help="write to this exact filename instead of using the transmitted filename",
+    )
     listen.add_argument("--timeout", type=float, default=30.0)
     return parser
 
@@ -118,6 +131,20 @@ def main(argv: list[str] | None = None) -> int:
                     f"Encoded {size} bytes to {destination} "
                     f"({len(samples) / 44_100:.2f} seconds, {profile.name} profile)"
                 )
+            elif args.command == "send":
+                print(
+                    f"Encoded {size} bytes "
+                    f"({len(samples) / 44_100:.2f} seconds, {profile.name} profile)"
+                )
+            if args.command == "send" and args.confirm:
+                try:
+                    confirmed = input("Play this transmission now? [y/N] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    confirmed = ""
+                    print()
+                if confirmed not in {"y", "yes"}:
+                    print("Playback cancelled; no sound was played.")
+                    return 0
             if args.command == "send" or args.play:
                 print("Playing transmission...")
                 play(samples)
@@ -125,10 +152,14 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "decode":
             samples, rate = read_wav(args.input)
+            output = args.output
+            exact_output = False
         else:
             samples, rate = record_transmission(timeout=args.timeout), 44_100
+            exact_output = args.output_file is not None
+            output = args.output_file if exact_output else args.output
         decoded = demodulate(samples, rate)
-        destination = _safe_output(args.output, decoded.filename)
+        destination = _safe_output(output, decoded.filename, exact=exact_output)
         destination.write_bytes(decoded.data)
         print(
             f"Recovered {len(decoded.data)} bytes to {destination} "

@@ -224,6 +224,48 @@ sha256sum ./hello.txt ./received/hello.txt
 
 The two SHA-256 hashes must be identical.
 
+## Simple send/receive scripts
+
+The repository includes self-setting-up wrappers for Windows and Linux. On the
+first run, the script creates `.venv`, upgrades pip, and installs Sonic Courier
+with live-audio support; later runs reuse that environment. No separate venv or
+pip commands are needed. Linux may request a sudo password once to install its
+Python venv and PortAudio system packages through apt, dnf, or pacman. Windows
+needs Python 3.10 or newer installed.
+
+Encoding finishes first, then the script asks
+`Play this transmission now? [y/N]` before it sends any sound to the speaker.
+Only `y` or `yes` starts playback.
+
+Windows PowerShell or Command Prompt:
+
+```powershell
+.\sonic-courier.cmd -e .\photo.jpg
+.\sonic-courier.cmd -d -o .\received-photo.jpg
+```
+
+Linux:
+
+```bash
+./sonic-courier.sh -e ./photo.jpg
+./sonic-courier.sh -d -o ./received-photo.jpg
+```
+
+The input file can also precede the encode flag, such as
+`.\sonic-courier.cmd .\photo.jpg -e` or `./sonic-courier.sh ./photo.jpg -e`.
+The receiver writes exactly the filename supplied to `-o`, including a filename
+without an extension. Start the `-d` receiver first, then run `-e` on the sender
+and confirm playback when the receiver is listening.
+
+Both scripts use the microphone-friendly `compatible` profile by default. Add
+`--profile ultrasonic` to `-e` for the original higher band. The receiver
+detects either profile automatically. Its default timeout is 60 seconds; change
+it with `--timeout`, for example:
+
+```bash
+./sonic-courier.sh -d -o ./received.bin --timeout 120
+```
+
 ## Send a real file through the air
 
 Use two computers for the clearest test. Install Sonic Courier on both, put them

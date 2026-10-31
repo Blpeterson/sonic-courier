@@ -2,10 +2,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
+
+import numpy as np
 
 from sonic_courier.audio import ToneProfile
 from sonic_courier.cli import main
@@ -14,6 +16,27 @@ from sonic_courier.protocol import build_frame, demodulate, modulate
 
 
 class CliTests(unittest.TestCase):
+    @patch("sonic_courier.cli.record_audio")
+    def test_probe_reports_active_microphone_samples(self, record_audio):
+        record_audio.return_value = np.array([0, 100, -200, 300] * 100, dtype=np.int16)
+        output = StringIO()
+        with redirect_stdout(output):
+            result = main(["probe", "--seconds", "1"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("Microphone probe: ACTIVE", output.getvalue())
+        self.assertIn("Microphone RMS:", output.getvalue())
+
+    @patch("sonic_courier.cli.record_audio")
+    def test_probe_rejects_an_all_zero_microphone(self, record_audio):
+        record_audio.return_value = np.zeros(1_000, dtype=np.int16)
+        error = StringIO()
+        with redirect_stderr(error):
+            result = main(["probe", "--seconds", "1"])
+
+        self.assertEqual(result, 1)
+        self.assertIn("returned only zeros", error.getvalue())
+
     @patch("sonic_courier.cli.inspect_devices")
     def test_doctor_reports_ready(self, inspect_devices):
         inspect_devices.return_value = AudioDeviceSummary(4, 2, 2, "Test Mic", "Test Speaker")

@@ -14,6 +14,7 @@ from .audio import (
     DEFAULT_TONE_PROFILE,
     TONE_PROFILES,
     ToneProfile,
+    find_dominant_frequency,
     read_wav,
     resolve_tone_profile,
     write_wav,
@@ -24,6 +25,7 @@ from .live import (
     negotiate_receiver,
     negotiate_sender,
     play,
+    record_audio,
     record_transmission,
 )
 from .protocol import ProtocolError, build_frame, demodulate, modulate
@@ -49,6 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("doctor", help="verify the installation and live audio devices")
+
+    probe = commands.add_parser("probe", help="measure live microphone samples for diagnosis")
+    probe.add_argument("--seconds", type=float, default=3.0)
 
     encode = commands.add_parser("encode", help="encode a file as a PCM WAV transmission")
     encode.add_argument("input", type=Path, help="file to transmit")
@@ -112,6 +117,25 @@ def _encode(path: Path, profile: str | ToneProfile = DEFAULT_TONE_PROFILE):
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "probe":
+            print(f"Recording {args.seconds:g} seconds from the default microphone...")
+            samples = record_audio(args.seconds)
+            absolute = np.abs(samples.astype(np.int32))
+            rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+            peak = int(np.max(absolute)) if absolute.size else 0
+            dominant = find_dominant_frequency(samples) if samples.size >= 3 else 0.0
+            print(f"Microphone RMS: {rms:.1f}")
+            print(f"Microphone peak: {peak} / 32767")
+            print(f"Dominant frequency: {dominant:.1f} Hz")
+            if peak == 0:
+                print(
+                    "Microphone probe: SILENCE (the operating system returned only zeros).",
+                    file=sys.stderr,
+                )
+                return 1
+            print("Microphone probe: ACTIVE")
+            return 0
+
         if args.command == "doctor":
             print(f"Sonic Courier: {__version__} [OK]")
             print(f"Python: {sys.version.split()[0]} [OK]")

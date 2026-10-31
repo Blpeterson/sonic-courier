@@ -203,7 +203,7 @@ git pull
 ./.venv/bin/sonic-courier doctor
 ```
 
-The version command should print `sonic-courier 1.1.0`. To confirm the repaired
+The version command should print `sonic-courier 1.1.1`. To confirm the repaired
 NumPy version without starting Sonic Courier:
 
 ```bash
@@ -272,6 +272,29 @@ negotiation and force a fixed band. The receiver's default handshake timeout is
 ```bash
 ./sonic-courier.sh -d -o ./received.bin --timeout 120
 ```
+
+### Diagnose Linux microphone access
+
+ALSA and JACK may print many warnings while PortAudio probes optional legacy
+devices. Sonic Courier 1.1.1 hides that probe noise while still reporting real
+stream failures. Set `SONIC_COURIER_AUDIO_DEBUG=1` only when the native backend
+messages are needed.
+
+If the receiver keeps reporting that no sender chirp was detected, make noise
+near the microphone while running:
+
+```bash
+./.venv/bin/sonic-courier doctor
+./.venv/bin/sonic-courier probe --seconds 5
+arecord -l
+aplay -l
+```
+
+`probe` must report `Microphone probe: ACTIVE` with a nonzero peak. If it reports
+only zeros, or `arecord -l` lists no capture hardware, the Debian session does
+not have access to the phone microphone. Android container/proot environments
+may require an audio bridge from the Android host; Sonic Courier cannot recover
+microphone samples that the container never receives.
 
 ## Send a real file through the air
 

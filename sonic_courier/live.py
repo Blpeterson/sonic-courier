@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
@@ -56,10 +59,37 @@ def _pyaudio():
     return pyaudio
 
 
+@contextmanager
+def _quiet_native_audio_errors():
+    """Hide Linux backend probing noise while preserving Python exceptions."""
+    if not sys.platform.startswith("linux") or os.environ.get("SONIC_COURIER_AUDIO_DEBUG"):
+        yield
+        return
+    try:
+        sys.stderr.flush()
+        saved_stderr = os.dup(2)
+        null_stderr = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        yield
+        return
+    try:
+        os.dup2(null_stderr, 2)
+        yield
+    finally:
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stderr)
+        os.close(null_stderr)
+
+
+def _audio_instance(pyaudio):
+    with _quiet_native_audio_errors():
+        return pyaudio.PyAudio()
+
+
 def inspect_devices() -> AudioDeviceSummary:
     """Inspect PortAudio without playing or recording any sound."""
     pyaudio = _pyaudio()
-    audio = pyaudio.PyAudio()
+    audio = _audio_instance(pyaudio)
     try:
         total = audio.get_device_count()
         devices = [audio.get_device_info_by_index(index) for index in range(total)]
@@ -83,10 +113,16 @@ def inspect_devices() -> AudioDeviceSummary:
 def play(samples: NDArray[np.int16], sample_rate: int = SAMPLE_RATE) -> None:
     """Play signed 16-bit mono PCM through the default output device."""
     pyaudio = _pyaudio()
-    audio = pyaudio.PyAudio()
+    audio = _audio_instance(pyaudio)
     stream = None
     try:
-        stream = audio.open(format=pyaudio.paInt16, channels=1, rate=sample_rate, output=True)
+        with _quiet_native_audio_errors():
+            stream = audio.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=sample_rate,
+                output=True,
+            )
         stream.write(np.asarray(samples, dtype="<i2").tobytes())
     except Exception as exc:
         raise LiveAudioError(f"audio playback failed: {exc}") from exc
@@ -102,19 +138,20 @@ def record_audio(duration: float, sample_rate: int = SAMPLE_RATE) -> NDArray[np.
     if duration <= 0:
         raise ValueError("duration must be positive")
     pyaudio = _pyaudio()
-    audio = pyaudio.PyAudio()
+    audio = _audio_instance(pyaudio)
     stream = None
     chunk_size = 1024
     remaining = round(duration * sample_rate)
     captured: list[NDArray[np.int16]] = []
     try:
-        stream = audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=sample_rate,
-            input=True,
-            frames_per_buffer=chunk_size,
-        )
+        with _quiet_native_audio_errors():
+            stream = audio.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=sample_rate,
+                input=True,
+                frames_per_buffer=chunk_size,
+            )
         while remaining > 0:
             count = min(chunk_size, remaining)
             raw = stream.read(count, exception_on_overflow=False)
@@ -181,7 +218,15 @@ def negotiate_receiver(
         try:
             forward_result = analyze_sounding_sweep(recording)
             candidates = rank_candidate_profiles(forward_result)
-        except NegotiationError:
+        except NegotiationError as exc:
+            rms = float(np.sqrt(np.mean(recording.astype(np.float64) ** 2)))
+            if rms < 2.0:
+                status(
+                    "No sender chirp detected; microphone RMS is effectively zero. "
+                    "This Linux session may not have microphone access."
+                )
+            else:
+                status(f"No sender chirp detected ({exc}); microphone RMS {rms:.0f}.")
             continue
         candidate_text = ", ".join(
             f"{profile.base_frequency / 1000:g}-"
@@ -233,7 +278,7 @@ def record_transmission(
     """Listen until a LOW preamble arrives, then record until sustained silence."""
     pyaudio = _pyaudio()
     chunk_size = round(sample_rate * 0.020)
-    audio = pyaudio.PyAudio()
+    audio = _audio_instance(pyaudio)
     stream = None
     captured: list[NDArray[np.int16]] = []
     rolling: list[NDArray[np.int16]] = []
@@ -249,13 +294,14 @@ def record_transmission(
     )
     status(f"Listening for a calibration tone at {profile_labels}...")
     try:
-        stream = audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=sample_rate,
-            input=True,
-            frames_per_buffer=chunk_size,
-        )
+        with _quiet_native_audio_errors():
+            stream = audio.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=sample_rate,
+                input=True,
+                frames_per_buffer=chunk_size,
+            )
         waited_chunks = 0
         while True:
             raw = stream.read(chunk_size, exception_on_overflow=False)

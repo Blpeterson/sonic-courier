@@ -17,6 +17,7 @@ supports it.
 
 - Relative 16-tone FSK at about 100 bit/s (12.5 bytes/s)
 - Microphone-friendly compatibility tones with automatic legacy-profile receive
+- Bidirectional noise-aware frequency negotiation with chirp synchronization
 - Dynamic calibration for speaker/microphone clock and pitch variation
 - Framed transfers with filename, payload length, and CRC-32 integrity checking
 - Deterministic WAV encoding/decoding plus optional live speaker/microphone I/O
@@ -190,7 +191,7 @@ step 1 is installed, then rerun the `pip install ".[live]"` command.
 NumPy 2.4 raised its minimum x86 CPU requirement. Older physical CPUs and some
 virtual machines exit immediately with `Illegal instruction` when that build is
 imported. This includes Core 2-era systems such as the Lenovo ThinkPad X61.
-Sonic Courier 1.0.1 pins NumPy below that incompatible boundary.
+Sonic Courier 1.0.1 and newer pin NumPy below that incompatible boundary.
 
 From inside the cloned `sonic-courier` directory, repair an existing virtual
 environment with:
@@ -202,7 +203,7 @@ git pull
 ./.venv/bin/sonic-courier doctor
 ```
 
-The version command should print `sonic-courier 1.0.1`. To confirm the repaired
+The version command should print `sonic-courier 1.1.0`. To confirm the repaired
 NumPy version without starting Sonic Courier:
 
 ```bash
@@ -254,13 +255,19 @@ Linux:
 The input file can also precede the encode flag, such as
 `.\sonic-courier.cmd .\photo.jpg -e` or `./sonic-courier.sh ./photo.jpg -e`.
 The receiver writes exactly the filename supplied to `-o`, including a filename
-without an extension. Start the `-d` receiver first, then run `-e` on the sender
-and confirm playback when the receiver is listening.
+without an extension. Either side can be launched first: the sender repeats its
+sounding attempt until the receiver responds. Once both are running, the
+adaptive handshake normally takes about ten seconds.
 
-Both scripts use the microphone-friendly `compatible` profile by default. Add
-`--profile ultrasonic` to `-e` for the original higher band. The receiver
-detects either profile automatically. Its default timeout is 60 seconds; change
-it with `--timeout`, for example:
+By default, the scripts measure background noise, sweep 4-19 kHz in both
+directions, exchange three candidate bands over a repeated 3-6 kHz control
+channel, and confirm the highest mutually reliable range before transferring
+the file. Chirp correlation, per-frequency signal-to-noise scoring, repeated
+control packets, and CRC checks protect the handshake from background sound.
+
+Add `--profile compatible` or `--profile ultrasonic` to `-e` to bypass adaptive
+negotiation and force a fixed band. The receiver's default handshake timeout is
+60 seconds; change it with `--timeout`, for example:
 
 ```bash
 ./sonic-courier.sh -d -o ./received.bin --timeout 120
@@ -304,10 +311,11 @@ Linux:
 
 The sender plays the transmission and also saves the exact WAV for debugging.
 The receiver writes `received\photo.jpg` only after its length and CRC-32 pass.
-Encoding and sending use the `compatible` profile by default. To use the original
-near-ultrasonic band on capable hardware, add `--profile ultrasonic` to either
-the `encode` or `send` command. The decoder and live listener detect both
-profiles automatically, so the receiving command does not need a profile flag.
+The full `encode` and `send` commands use the `compatible` fixed profile by
+default. Add `--profile ultrasonic` for the original near-ultrasonic band, or
+use `send --auto` together with `listen --auto` for the same adaptive handshake
+used by the wrapper scripts. WAV decoding detects both fixed profiles
+automatically.
 
 Start with a tiny text file: throughput is about 12.5 bytes per second, and many
 consumer speakers, microphones, and voice-processing modes filter high
@@ -333,6 +341,7 @@ alternative entry point, not an instruction to execute a folder.
 
 | Profile | Calibration LOW | Data tones (`0x0`-`0xF`) | Calibration HIGH |
 |---|---:|---:|---:|
+| `auto` (scripts) | negotiated | 16 tones in a 3.4 kHz calibration window | negotiated |
 | `compatible` (default) | 12,000 Hz | 12,200-15,200 Hz, 200 Hz steps | 15,400 Hz |
 | `ultrasonic` (legacy) | 17,000 Hz | 17,250-21,000 Hz, 250 Hz steps | 21,250 Hz |
 

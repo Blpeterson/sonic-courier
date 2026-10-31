@@ -7,9 +7,10 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from sonic_courier.audio import ToneProfile
 from sonic_courier.cli import main
 from sonic_courier.live import AudioDeviceSummary, LiveAudioError
-from sonic_courier.protocol import build_frame, modulate
+from sonic_courier.protocol import build_frame, demodulate, modulate
 
 
 class CliTests(unittest.TestCase):
@@ -141,6 +142,25 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertIn("Playback cancelled", output.getvalue())
             play.assert_not_called()
+
+    def test_auto_send_negotiates_before_file_playback(self):
+        negotiated = ToneProfile("auto-8400", 8_400.0, 200.0)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "tiny.bin"
+            source.write_bytes(b"x")
+            with (
+                patch("builtins.input", return_value="yes"),
+                patch("sonic_courier.cli.negotiate_sender", return_value=negotiated) as negotiate,
+                patch("sonic_courier.cli.time.sleep"),
+                patch("sonic_courier.cli.play") as play,
+            ):
+                result = main(["send", str(source), "--auto", "--confirm"])
+
+            self.assertEqual(result, 0)
+            negotiate.assert_called_once()
+            played_samples = play.call_args.args[0]
+            decoded = demodulate(played_samples, profile=negotiated)
+            self.assertEqual(decoded.data, b"x")
 
     def test_missing_input_returns_error(self):
         result = subprocess.run(

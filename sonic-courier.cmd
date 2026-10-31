@@ -108,7 +108,11 @@ if errorlevel 1 goto bootstrap_environment
 if not exist "%VENV_LAUNCHER%" goto install_project
 "%VENV_LAUNCHER%" send --help 2>nul | findstr /C:"--confirm" >nul
 if errorlevel 1 goto install_project
+"%VENV_LAUNCHER%" send --help 2>nul | findstr /C:"--auto" >nul
+if errorlevel 1 goto install_project
 "%VENV_LAUNCHER%" listen --help 2>nul | findstr /C:"--output-file" >nul
+if errorlevel 1 goto install_project
+"%VENV_LAUNCHER%" listen --help 2>nul | findstr /C:"--auto" >nul
 if errorlevel 1 goto install_project
 goto use_local_launcher
 
@@ -178,7 +182,7 @@ if errorlevel 1 goto install_failed_popd
 if errorlevel 1 goto install_failed_popd
 popd
 if not exist "%VENV_LAUNCHER%" goto install_failed
-"%VENV_PYTHON%" -c "import numpy, pyaudio, sonic_courier" >nul 2>nul
+"%VENV_PYTHON%" -c "import numpy, pyaudio, sonic_courier, sonic_courier.negotiation" >nul 2>nul
 if errorlevel 1 goto install_failed
 echo [setup] Sonic Courier is ready.
 goto use_local_launcher
@@ -203,6 +207,15 @@ if /I "%MODE%"=="encode" goto execute_encode
 goto execute_decode
 
 :execute_encode
+if defined PROFILE_SET goto execute_encode_fixed
+if defined RUNNER_IS_PYTHON (
+    "%RUNNER%" -m sonic_courier send "%INPUT_FILE%" --auto --confirm
+) else (
+    "%RUNNER%" send "%INPUT_FILE%" --auto --confirm
+)
+exit /b %ERRORLEVEL%
+
+:execute_encode_fixed
 if defined RUNNER_IS_PYTHON (
     "%RUNNER%" -m sonic_courier send "%INPUT_FILE%" --profile "%PROFILE%" --confirm
 ) else (
@@ -212,9 +225,9 @@ exit /b %ERRORLEVEL%
 
 :execute_decode
 if defined RUNNER_IS_PYTHON (
-    "%RUNNER%" -m sonic_courier listen --output-file "%OUTPUT_FILE%" --timeout "%TIMEOUT%"
+    "%RUNNER%" -m sonic_courier listen --auto --output-file "%OUTPUT_FILE%" --timeout "%TIMEOUT%"
 ) else (
-    "%RUNNER%" listen --output-file "%OUTPUT_FILE%" --timeout "%TIMEOUT%"
+    "%RUNNER%" listen --auto --output-file "%OUTPUT_FILE%" --timeout "%TIMEOUT%"
 )
 exit /b %ERRORLEVEL%
 

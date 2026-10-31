@@ -173,7 +173,9 @@ ensure_local_runner() {
         && "$venv_python" -c 'import numpy, pyaudio' >/dev/null 2>&1; then
         if [ -x "$venv_launcher" ] \
             && "$venv_launcher" send --help 2>/dev/null | grep -q -- '--confirm' \
-            && "$venv_launcher" listen --help 2>/dev/null | grep -q -- '--output-file'; then
+            && "$venv_launcher" send --help 2>/dev/null | grep -q -- '--auto' \
+            && "$venv_launcher" listen --help 2>/dev/null | grep -q -- '--output-file' \
+            && "$venv_launcher" listen --help 2>/dev/null | grep -q -- '--auto'; then
             return 0
         fi
         install_project
@@ -192,7 +194,11 @@ run_courier() {
 }
 
 if [ "$mode" = encode ]; then
-    run_courier send "$input_file" --profile "$profile" --confirm
+    if [ "$profile_set" = true ]; then
+        run_courier send "$input_file" --profile "$profile" --confirm
+    else
+        run_courier send "$input_file" --auto --confirm
+    fi
 else
-    run_courier listen --output-file "$output_file" --timeout "$timeout"
+    run_courier listen --auto --output-file "$output_file" --timeout "$timeout"
 fi

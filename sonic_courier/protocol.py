@@ -114,7 +114,9 @@ def modulate(
 
 
 def _find_transmission_start(
-    samples: NDArray[np.int16], sample_rate: int
+    samples: NDArray[np.int16],
+    sample_rate: int,
+    profile: ToneProfile | None = None,
 ) -> tuple[int, ToneProfile]:
     """Find a supported LOW preamble, ignoring leading silence and noise."""
     window_size = max(128, round(sample_rate * 0.020))
@@ -125,15 +127,23 @@ def _find_transmission_start(
         if np.sqrt(np.mean(chunk.astype(np.float64) ** 2)) < 150.0:
             continue
         peak = find_dominant_frequency(chunk, sample_rate)
-        profile = match_tone_profile(peak)
-        if profile is not None:
+        detected_profile = (
+            profile
+            if profile is not None and abs(profile.base_frequency - peak) <= 600.0
+            else match_tone_profile(peak) if profile is None else None
+        )
+        if detected_profile is not None:
             # Refine onset using a short-time RMS threshold around this candidate.
             search_start = max(0, offset - window_size)
             absolute = np.abs(samples[search_start : offset + window_size].astype(np.int32))
             threshold = max(100, int(np.max(absolute) * 0.03))
             hits = np.flatnonzero(absolute >= threshold)
             start = search_start + int(hits[0]) if hits.size else offset
-            return start, profile
+            return start, detected_profile
+    if profile is not None:
+        raise ProtocolError(
+            f"no {profile.base_frequency / 1000:g} kHz negotiated calibration preamble found"
+        )
     raise ProtocolError("no supported calibration preamble found (expected 12 kHz or 17 kHz)")
 
 
@@ -148,30 +158,36 @@ def _calibration_frequency(
     return find_dominant_frequency(chunk, sample_rate)
 
 
-def demodulate(samples: NDArray[np.int16], sample_rate: int = SAMPLE_RATE) -> DecodedFile:
+def demodulate(
+    samples: NDArray[np.int16],
+    sample_rate: int = SAMPLE_RATE,
+    *,
+    profile: str | ToneProfile | None = None,
+) -> DecodedFile:
     """Recover and validate one framed file from mono PCM samples."""
     mono = np.asarray(samples, dtype=np.int16)
     if mono.ndim != 1:
         raise ValueError("samples must be mono")
-    start, profile = _find_transmission_start(mono, sample_rate)
+    requested_profile = resolve_tone_profile(profile) if profile is not None else None
+    start, detected_profile = _find_transmission_start(mono, sample_rate, requested_profile)
     nominal_preamble_samples = sample_rate * PREAMBLE_DURATION
     nominal_symbol_samples = sample_rate * SYMBOL_DURATION
     f_low = _calibration_frequency(mono, start, PREAMBLE_DURATION, sample_rate)
-    if abs(f_low - profile.base_frequency) > 600.0:
+    if abs(f_low - detected_profile.base_frequency) > 600.0:
         raise ProtocolError(f"invalid LOW calibration frequency: {f_low:.1f} Hz")
     # Sample-clock mismatch shifts both pitch and tone duration by reciprocal
     # factors. Deriving timing from LOW keeps long frames aligned under drift.
-    timing_scale = profile.base_frequency / f_low
+    timing_scale = detected_profile.base_frequency / f_low
     preamble_samples = nominal_preamble_samples * timing_scale
     symbol_samples = nominal_symbol_samples * timing_scale
     f_high = _calibration_frequency(
         mono, start + round(preamble_samples), PREAMBLE_DURATION * timing_scale, sample_rate
     )
-    expected_high = profile.high_preamble_frequency / timing_scale
+    expected_high = detected_profile.high_preamble_frequency / timing_scale
     if f_high >= sample_rate / 2 or abs(f_high - expected_high) > 600.0:
         raise ProtocolError(f"invalid HIGH calibration frequency: {f_high:.1f} Hz")
     step = (f_high - f_low) / 17.0
-    expected_step = profile.step_frequency / timing_scale
+    expected_step = detected_profile.step_frequency / timing_scale
     if not expected_step * 0.72 <= step <= expected_step * 1.28:
         raise ProtocolError(f"invalid measured channel spacing: {step:.1f} Hz")
 

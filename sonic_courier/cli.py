@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +18,14 @@ from .audio import (
     resolve_tone_profile,
     write_wav,
 )
-from .live import LiveAudioError, inspect_devices, play, record_transmission
+from .live import (
+    LiveAudioError,
+    inspect_devices,
+    negotiate_receiver,
+    negotiate_sender,
+    play,
+    record_transmission,
+)
 from .protocol import ProtocolError, build_frame, demodulate, modulate
 
 
@@ -56,17 +64,23 @@ def build_parser() -> argparse.ArgumentParser:
     send = commands.add_parser("send", help="encode and play a file through the default speaker")
     send.add_argument("input", type=Path, help="file to transmit")
     send.add_argument("--save", type=Path, help="also save the generated WAV")
-    send.add_argument(
+    send_transport = send.add_mutually_exclusive_group()
+    send_transport.add_argument(
         "--profile",
         choices=TONE_PROFILES,
-        default=DEFAULT_TONE_PROFILE.name,
-        help="tone range to use (default: %(default)s)",
+        help="use a fixed tone range instead of negotiating automatically",
+    )
+    send_transport.add_argument(
+        "--auto",
+        action="store_true",
+        help="negotiate a noise-aware frequency range with the receiver",
     )
     send.add_argument(
         "--confirm",
         action="store_true",
         help="encode first, then ask before playing sound",
     )
+    send.add_argument("--handshake-timeout", type=float, default=30.0)
 
     decode = commands.add_parser("decode", help="decode a transmission WAV")
     decode.add_argument("input", type=Path, help="16-bit PCM WAV to decode")
@@ -78,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-file",
         type=Path,
         help="write to this exact filename instead of using the transmitted filename",
+    )
+    listen.add_argument(
+        "--auto",
+        action="store_true",
+        help="negotiate a noise-aware frequency range with the sender",
     )
     listen.add_argument("--timeout", type=float, default=30.0)
     return parser
@@ -145,6 +164,15 @@ def main(argv: list[str] | None = None) -> int:
                 if confirmed not in {"y", "yes"}:
                     print("Playback cancelled; no sound was played.")
                     return 0
+            if args.command == "send" and args.auto:
+                print("Starting the adaptive acoustic handshake...")
+                profile = negotiate_sender(timeout=args.handshake_timeout)
+                samples, size = _encode(args.input, profile)
+                print(
+                    f"Re-encoded {size} bytes for the negotiated band "
+                    f"({len(samples) / 44_100:.2f} seconds)."
+                )
+                time.sleep(1.0)
             if args.command == "send" or args.play:
                 print("Playing transmission...")
                 play(samples)
@@ -154,11 +182,19 @@ def main(argv: list[str] | None = None) -> int:
             samples, rate = read_wav(args.input)
             output = args.output
             exact_output = False
+            negotiated_profile = None
         else:
-            samples, rate = record_transmission(timeout=args.timeout), 44_100
+            negotiated_profile = (
+                negotiate_receiver(timeout=args.timeout) if args.auto else None
+            )
+            samples = record_transmission(
+                timeout=args.timeout,
+                profile=negotiated_profile,
+            )
+            rate = 44_100
             exact_output = args.output_file is not None
             output = args.output_file if exact_output else args.output
-        decoded = demodulate(samples, rate)
+        decoded = demodulate(samples, rate, profile=negotiated_profile)
         destination = _safe_output(output, decoded.filename, exact=exact_output)
         destination.write_bytes(decoded.data)
         print(

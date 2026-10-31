@@ -63,7 +63,7 @@ class _WrapperContract:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             self._forwarded_arguments(),
-            ["send", str(source), "--profile", "compatible", "--confirm"],
+            ["send", str(source), "--auto", "--confirm"],
         )
 
     def test_encode_accepts_the_file_before_the_flag(self):
@@ -75,7 +75,19 @@ class _WrapperContract:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             self._forwarded_arguments(),
-            ["send", str(source), "--profile", "compatible", "--confirm"],
+            ["send", str(source), "--auto", "--confirm"],
+        )
+
+    def test_encode_can_force_a_fixed_profile(self):
+        source = self.temp / "fixed.bin"
+        source.write_bytes(b"test")
+
+        result = self._run("-e", str(source), "--profile", "ultrasonic")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self._forwarded_arguments(),
+            ["send", str(source), "--profile", "ultrasonic", "--confirm"],
         )
 
     def test_decode_forwards_exact_output_and_timeout(self):
@@ -86,7 +98,7 @@ class _WrapperContract:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             self._forwarded_arguments(),
-            ["listen", "--output-file", str(output), "--timeout", "12.5"],
+            ["listen", "--auto", "--output-file", str(output), "--timeout", "12.5"],
         )
 
     def test_invalid_argument_combinations_do_not_run_courier(self):

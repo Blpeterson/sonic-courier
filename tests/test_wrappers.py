@@ -124,6 +124,17 @@ class _WrapperContract:
 
         self.assertEqual(result.returncode, 7)
 
+    def test_diagnostic_modes_are_forwarded(self):
+        if self.script_name != "sonic-courier.sh":
+            self.skipTest("Linux diagnostic wrapper modes")
+        result = self._run("--doctor")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._forwarded_arguments(), ["doctor"])
+
+        result = self._run("--probe", "4")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._forwarded_arguments(), ["probe", "--seconds", "4"])
+
 
 @unittest.skipUnless(os.name == "nt", "Windows command wrapper test")
 class WindowsWrapperTests(_WrapperContract, unittest.TestCase):

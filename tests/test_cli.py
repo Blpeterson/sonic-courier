@@ -39,12 +39,20 @@ class CliTests(unittest.TestCase):
 
     @patch("sonic_courier.cli.inspect_devices")
     def test_doctor_reports_ready(self, inspect_devices):
-        inspect_devices.return_value = AudioDeviceSummary(4, 2, 2, "Test Mic", "Test Speaker")
+        inspect_devices.return_value = AudioDeviceSummary(
+            4,
+            2,
+            2,
+            "Test Mic",
+            "Test Speaker",
+            ("0: Test Mic (inputs=1, outputs=0, rate=44100)",),
+        )
         output = StringIO()
         with redirect_stdout(output):
             result = main(["doctor"])
         self.assertEqual(result, 0)
         self.assertIn("Live audio: READY", output.getvalue())
+        self.assertIn("0: Test Mic", output.getvalue())
         self.assertIn("Test Mic", output.getvalue())
         self.assertIn("12.2-15.2 kHz (compatible)", output.getvalue())
 

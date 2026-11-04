@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -106,6 +107,22 @@ class LiveAudioTests(unittest.TestCase):
                 self.assertTrue(stream.stopped)
                 self.assertTrue(stream.closed)
                 self.assertTrue(audio.terminated)
+
+    def test_recording_honors_configured_input_device(self):
+        chunk_size = round(SAMPLE_RATE * 0.020)
+        tone = generate_sine_wave(12_000.0, 0.020, fade_duration=0)
+        silence = np.zeros(chunk_size, dtype=np.int16)
+        stream = _FakeStream([tone.tobytes(), silence.tobytes()])
+        audio = _FakeAudio(stream)
+        module = _FakePyAudioModule(audio)
+
+        with (
+            patch("sonic_courier.live._pyaudio", return_value=module),
+            patch.dict(os.environ, {"SONIC_COURIER_INPUT_DEVICE": "7"}),
+        ):
+            record_transmission(timeout=1.0, silence_duration=0.020, status=lambda _msg: None)
+
+        self.assertEqual(audio.open_arguments["input_device_index"], 7)
 
 
 if __name__ == "__main__":

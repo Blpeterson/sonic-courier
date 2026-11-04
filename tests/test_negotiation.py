@@ -40,6 +40,15 @@ class NegotiationTests(unittest.TestCase):
         self.assertLessEqual(profiles[0].high_preamble_frequency, 12_400)
         self.assertGreater(profile_score(result, profiles[0]), 20.0)
 
+    def test_sounding_rejects_a_chirp_without_a_usable_frequency_band(self):
+        levels = np.zeros_like(SOUNDING_FREQUENCIES)
+        sweep = generate_sounding_sweep(amplitudes=levels)
+
+        result = analyze_sounding_sweep(sweep)
+
+        with self.assertRaisesRegex(ValueError, "background noise"):
+            rank_candidate_profiles(result)
+
     def test_control_message_survives_leading_noise(self):
         profiles = (
             ToneProfile("auto-8400", 8_400.0, 200.0),

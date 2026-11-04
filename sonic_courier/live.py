@@ -47,6 +47,7 @@ class AudioDeviceSummary:
     outputs: int
     default_input: str | None
     default_output: str | None
+    device_details: tuple[str, ...] = ()
 
 
 def _pyaudio():
@@ -86,6 +87,21 @@ def _audio_instance(pyaudio):
         return pyaudio.PyAudio()
 
 
+def _configured_device(kind: str) -> int | None:
+    value = os.environ.get(f"SONIC_COURIER_{kind.upper()}_DEVICE")
+    if value is None or not value.strip():
+        return None
+    try:
+        index = int(value)
+    except ValueError as exc:
+        raise LiveAudioError(
+            f"SONIC_COURIER_{kind.upper()}_DEVICE must be a numeric PortAudio device index"
+        ) from exc
+    if index < 0:
+        raise LiveAudioError(f"the configured {kind} device index cannot be negative")
+    return index
+
+
 def inspect_devices() -> AudioDeviceSummary:
     """Inspect PortAudio without playing or recording any sound."""
     pyaudio = _pyaudio()
@@ -103,7 +119,14 @@ def inspect_devices() -> AudioDeviceSummary:
             default_output = str(audio.get_default_output_device_info()["name"])
         except OSError:
             default_output = None
-        return AudioDeviceSummary(total, inputs, outputs, default_input, default_output)
+        details = tuple(
+            f"{index}: {device.get('name', 'unnamed')} "
+            f"(inputs={int(device.get('maxInputChannels', 0))}, "
+            f"outputs={int(device.get('maxOutputChannels', 0))}, "
+            f"rate={float(device.get('defaultSampleRate', 0)):g})"
+            for index, device in enumerate(devices)
+        )
+        return AudioDeviceSummary(total, inputs, outputs, default_input, default_output, details)
     except Exception as exc:
         raise LiveAudioError(f"audio device inspection failed: {exc}") from exc
     finally:
@@ -122,6 +145,7 @@ def play(samples: NDArray[np.int16], sample_rate: int = SAMPLE_RATE) -> None:
                 channels=1,
                 rate=sample_rate,
                 output=True,
+                output_device_index=_configured_device("output"),
             )
         stream.write(np.asarray(samples, dtype="<i2").tobytes())
     except Exception as exc:
@@ -150,6 +174,7 @@ def record_audio(duration: float, sample_rate: int = SAMPLE_RATE) -> NDArray[np.
                 channels=1,
                 rate=sample_rate,
                 input=True,
+                input_device_index=_configured_device("input"),
                 frames_per_buffer=chunk_size,
             )
         while remaining > 0:
@@ -300,6 +325,7 @@ def record_transmission(
                 channels=1,
                 rate=sample_rate,
                 input=True,
+                input_device_index=_configured_device("input"),
                 frames_per_buffer=chunk_size,
             )
         waited_chunks = 0

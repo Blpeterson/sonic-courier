@@ -156,6 +156,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Output devices: {devices.outputs}")
             print(f"Default input: {devices.default_input or 'NONE'}")
             print(f"Default output: {devices.default_output or 'NONE'}")
+            if devices.device_details:
+                print("Audio devices:")
+                for detail in devices.device_details:
+                    print(f"  {detail}")
+                print(
+                    "Override defaults with SONIC_COURIER_INPUT_DEVICE or "
+                    "SONIC_COURIER_OUTPUT_DEVICE."
+                )
             if not devices.inputs or not devices.outputs:
                 print("Live audio: NOT READY (an input and output device are both required)")
                 return 1

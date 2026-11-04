@@ -5,6 +5,9 @@ set -u
 usage() {
     cat <<'EOF'
 Usage:
+  sonic-courier.sh --setup
+  sonic-courier.sh --doctor
+  sonic-courier.sh --probe [SECONDS]
   sonic-courier.sh -e INPUT_FILE [--profile compatible|ultrasonic]
   sonic-courier.sh INPUT_FILE -e [--profile compatible|ultrasonic]
   sonic-courier.sh -d -o OUTPUT_FILE [--timeout SECONDS]
@@ -33,6 +36,27 @@ while [ "$#" -gt 0 ]; do
         -h|--help)
             usage
             exit 0
+            ;;
+        --setup)
+            [ -z "$mode" ] || fail '--setup cannot be combined with another mode'
+            mode=setup
+            shift
+            ;;
+        --doctor)
+            [ -z "$mode" ] || fail '--doctor cannot be combined with another mode'
+            mode=doctor
+            shift
+            ;;
+        --probe)
+            [ -z "$mode" ] || fail '--probe cannot be combined with another mode'
+            mode=probe
+            shift
+            if [ "$#" -gt 0 ]; then
+                case $1 in
+                    ''|*[!0-9.]*) ;;
+                    *) timeout=$1; shift ;;
+                esac
+            fi
             ;;
         -e|--encode)
             [ "$mode" != decode ] || fail 'choose exactly one of -e or -d'
@@ -79,7 +103,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ -n "$mode" ] || fail 'choose -e to send or -d to receive'
+[ -n "$mode" ] || fail 'choose -e, -d, --setup, --doctor, or --probe'
 case $profile in
     compatible|ultrasonic) ;;
     *) fail '--profile must be compatible or ultrasonic' ;;
@@ -89,10 +113,15 @@ if [ "$mode" = encode ]; then
     [ -n "$input_file" ] || fail '-e requires an input file'
     [ -z "$output_file" ] || fail '-o is only used with -d'
     [ "$timeout_set" = false ] || fail '--timeout is only used with -d'
-else
+elif [ "$mode" = decode ]; then
     [ -z "$input_file" ] || fail '-d does not take an input file'
     [ -n "$output_file" ] || fail '-d requires -o OUTPUT_FILE'
     [ "$profile_set" = false ] || fail '--profile is only used with -e; receiving detects it'
+else
+    [ -z "$input_file" ] || fail "$mode mode does not take a file"
+    [ -z "$output_file" ] || fail "-o cannot be used with $mode mode"
+    [ "$profile_set" = false ] || fail "--profile cannot be used with $mode mode"
+    [ "$timeout_set" = false ] || fail "--timeout cannot be used with $mode mode"
 fi
 
 script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
@@ -193,7 +222,13 @@ run_courier() {
     fi
 }
 
-if [ "$mode" = encode ]; then
+if [ "$mode" = setup ]; then
+    bootstrap_environment
+elif [ "$mode" = doctor ]; then
+    run_courier doctor
+elif [ "$mode" = probe ]; then
+    run_courier probe --seconds "$timeout"
+elif [ "$mode" = encode ]; then
     if [ "$profile_set" = true ]; then
         run_courier send "$input_file" --profile "$profile" --confirm
     else

@@ -31,6 +31,7 @@ CONTROL_MAGIC = b"SC"
 CONTROL_CANDIDATES = 1
 CONTROL_PLAN = 2
 CONTROL_PACKET_SIZE = 8
+MINIMUM_PROFILE_SCORE_DB = 6.0
 
 SOUNDING_DURATION = (
     SOUNDING_PREAMBLE_DURATION
@@ -106,8 +107,11 @@ def generate_sounding_sweep(
             raise ValueError("sounding amplitudes must be between 0 and 1")
     guard = np.zeros(round(sample_rate * SOUNDING_GUARD_DURATION), dtype=np.int16)
     parts = [_sounding_preamble(sample_rate), guard]
+    tone_samples = round(sample_rate * SOUNDING_TONE_DURATION)
     parts.extend(
-        generate_sine_wave(
+        np.zeros(tone_samples, dtype=np.int16)
+        if level == 0.0
+        else generate_sine_wave(
             float(frequency),
             SOUNDING_TONE_DURATION,
             sample_rate,
@@ -233,13 +237,17 @@ def rank_candidate_profiles(result: SoundingResult, limit: int = 3) -> tuple[Ton
         ranked.append((profile_score(result, profile) + high_frequency_bias, profile))
     ranked.sort(key=lambda item: item[0], reverse=True)
     selected: list[ToneProfile] = []
-    for _score, profile in ranked:
+    for score, profile in ranked:
+        if score < MINIMUM_PROFILE_SCORE_DB:
+            continue
         if all(abs(profile.base_frequency - other.base_frequency) >= 800.0 for other in selected):
             selected.append(profile)
         if len(selected) == limit:
             break
     if not selected:
-        raise NegotiationError("no usable contiguous frequency band was measured")
+        raise NegotiationError(
+            "no contiguous frequency band rose far enough above the background noise"
+        )
     return tuple(selected)
 
 

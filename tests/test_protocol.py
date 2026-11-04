@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -99,6 +100,21 @@ class ProtocolTests(unittest.TestCase):
         result = demodulate(modulate(build_frame(data, "sample.bin")))
         self.assertEqual(result.filename, "sample.bin")
         self.assertEqual(result.data, data)
+
+    def test_standard_and_extended_preambles_are_cross_compatible(self):
+        frame = build_frame(b"cross-version", "cross.bin")
+        for transmitter_duration, receiver_duration in ((0.1, 5.0), (5.0, 0.1)):
+            with patch("sonic_courier.protocol.PREAMBLE_DURATION", transmitter_duration):
+                signal = modulate(frame)
+            with (
+                self.subTest(
+                    transmitter_duration=transmitter_duration,
+                    receiver_duration=receiver_duration,
+                ),
+                patch("sonic_courier.protocol.PREAMBLE_DURATION", receiver_duration),
+            ):
+                result = demodulate(signal)
+                self.assertEqual((result.filename, result.data), ("cross.bin", b"cross-version"))
 
     def test_empty_file_round_trip(self):
         result = demodulate(modulate(build_frame(b"", "empty.dat")))

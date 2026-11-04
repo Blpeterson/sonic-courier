@@ -26,6 +26,7 @@ MAGIC = b"SC01"
 HEADER = struct.Struct(">4sQIH")  # magic, payload length, CRC-32, UTF-8 filename length
 MAX_FILENAME_BYTES = 255
 MAX_PAYLOAD_BYTES = 1 << 34
+SUPPORTED_PREAMBLE_DURATIONS = (0.100, 5.0)
 
 
 class ProtocolError(ValueError):
@@ -158,6 +159,39 @@ def _calibration_frequency(
     return find_dominant_frequency(chunk, sample_rate)
 
 
+def _detect_preamble_duration(
+    samples: NDArray[np.int16],
+    start: int,
+    profile: ToneProfile,
+    sample_rate: int,
+) -> tuple[float, float, float]:
+    """Recognize standard and extended LOW/HIGH calibration preambles."""
+    candidates = tuple(dict.fromkeys((PREAMBLE_DURATION, *SUPPORTED_PREAMBLE_DURATIONS)))
+    errors: list[str] = []
+    for duration in candidates:
+        try:
+            f_low = _calibration_frequency(samples, start, duration, sample_rate)
+            if abs(f_low - profile.base_frequency) > 600.0:
+                errors.append(f"{duration:g}s LOW measured {f_low:.1f} Hz")
+                continue
+            timing_scale = profile.base_frequency / f_low
+            measured_duration = duration * timing_scale
+            f_high = _calibration_frequency(
+                samples,
+                start + round(sample_rate * measured_duration),
+                measured_duration,
+                sample_rate,
+            )
+            expected_high = profile.high_preamble_frequency / timing_scale
+            if f_high < sample_rate / 2 and abs(f_high - expected_high) <= 600.0:
+                return duration, f_low, f_high
+            errors.append(f"{duration:g}s HIGH measured {f_high:.1f} Hz")
+        except ProtocolError as exc:
+            errors.append(f"{duration:g}s: {exc}")
+    details = "; ".join(errors)
+    raise ProtocolError(f"no valid LOW/HIGH calibration pair was found ({details})")
+
+
 def demodulate(
     samples: NDArray[np.int16],
     sample_rate: int = SAMPLE_RATE,
@@ -170,18 +204,18 @@ def demodulate(
         raise ValueError("samples must be mono")
     requested_profile = resolve_tone_profile(profile) if profile is not None else None
     start, detected_profile = _find_transmission_start(mono, sample_rate, requested_profile)
-    nominal_preamble_samples = sample_rate * PREAMBLE_DURATION
     nominal_symbol_samples = sample_rate * SYMBOL_DURATION
-    f_low = _calibration_frequency(mono, start, PREAMBLE_DURATION, sample_rate)
-    if abs(f_low - detected_profile.base_frequency) > 600.0:
-        raise ProtocolError(f"invalid LOW calibration frequency: {f_low:.1f} Hz")
+    preamble_duration, f_low, _initial_high = _detect_preamble_duration(
+        mono, start, detected_profile, sample_rate
+    )
     # Sample-clock mismatch shifts both pitch and tone duration by reciprocal
     # factors. Deriving timing from LOW keeps long frames aligned under drift.
     timing_scale = detected_profile.base_frequency / f_low
+    nominal_preamble_samples = sample_rate * preamble_duration
     preamble_samples = nominal_preamble_samples * timing_scale
     symbol_samples = nominal_symbol_samples * timing_scale
     f_high = _calibration_frequency(
-        mono, start + round(preamble_samples), PREAMBLE_DURATION * timing_scale, sample_rate
+        mono, start + round(preamble_samples), preamble_duration * timing_scale, sample_rate
     )
     expected_high = detected_profile.high_preamble_frequency / timing_scale
     if f_high >= sample_rate / 2 or abs(f_high - expected_high) > 600.0:

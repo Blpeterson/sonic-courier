@@ -203,7 +203,7 @@ git pull
 ./.venv/bin/sonic-courier doctor
 ```
 
-The version command should print `sonic-courier 1.2.0`. To confirm the repaired
+The version command should print `sonic-courier 1.2.1`. To confirm the repaired
 NumPy version without starting Sonic Courier:
 
 ```bash
@@ -276,7 +276,7 @@ negotiation and force a fixed band. The receiver's default handshake timeout is
 ### Diagnose Linux microphone access
 
 ALSA and JACK may print many warnings while PortAudio probes optional legacy
-devices. Sonic Courier 1.2.0 hides that probe noise while still reporting real
+devices. Sonic Courier 1.2.1 hides that probe noise while still reporting real
 stream failures. Set `SONIC_COURIER_AUDIO_DEBUG=1` only when the native backend
 messages are needed.
 

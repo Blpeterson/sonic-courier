@@ -203,7 +203,7 @@ git pull
 ./.venv/bin/sonic-courier doctor
 ```
 
-The version command should print `sonic-courier 1.1.2`. To confirm the repaired
+The version command should print `sonic-courier 1.2.0`. To confirm the repaired
 NumPy version without starting Sonic Courier:
 
 ```bash
@@ -276,7 +276,7 @@ negotiation and force a fixed band. The receiver's default handshake timeout is
 ### Diagnose Linux microphone access
 
 ALSA and JACK may print many warnings while PortAudio probes optional legacy
-devices. Sonic Courier 1.1.2 hides that probe noise while still reporting real
+devices. Sonic Courier 1.2.0 hides that probe noise while still reporting real
 stream failures. Set `SONIC_COURIER_AUDIO_DEBUG=1` only when the native backend
 messages are needed.
 
@@ -311,6 +311,19 @@ Use the actual indices printed on your device. Remove an override with
 `unset SONIC_COURIER_INPUT_DEVICE` or `unset SONIC_COURIER_OUTPUT_DEVICE`.
 
 ## Send a real file through the air
+
+### Interactive mobile menu
+
+On Linux or an Android Linux terminal, run the script without any arguments:
+
+```bash
+./sonic-courier.sh
+```
+
+Choose a numbered action. Press Enter to accept values shown in brackets. The
+default first option receives a file using automatic frequency negotiation,
+saves it as `received.bin`, and waits up to 120 seconds. Windows has the same
+guided menu when `sonic-courier.cmd` is run without arguments.
 
 Use two computers for the clearest test. Install Sonic Courier on both, put them
 close together, start at low speaker volume, and disable noise suppression or

@@ -26,7 +26,12 @@ class _WrapperContract:
     def _wrapper_command(self, arguments: list[str]) -> list[str]:
         raise NotImplementedError
 
-    def _run(self, *arguments: str, runner_exit: int = 0) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self,
+        *arguments: str,
+        runner_exit: int = 0,
+        input_text: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment.update(
             {
@@ -41,6 +46,7 @@ class _WrapperContract:
             env=environment,
             capture_output=True,
             check=False,
+            input=input_text,
             text=True,
         )
 
@@ -103,7 +109,6 @@ class _WrapperContract:
 
     def test_invalid_argument_combinations_do_not_run_courier(self):
         invalid_commands = (
-            (),
             ("-e",),
             ("-d",),
             ("-e", "-d", "file.bin", "-o", "received.bin"),
@@ -123,6 +128,15 @@ class _WrapperContract:
         result = self._run("-e", str(source), runner_exit=7)
 
         self.assertEqual(result.returncode, 7)
+
+    def test_no_arguments_opens_receive_menu_with_defaults(self):
+        result = self._run(input_text="1\n\n\n")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self._forwarded_arguments(),
+            ["listen", "--auto", "--output-file", "received.bin", "--timeout", "120"],
+        )
 
     def test_diagnostic_modes_are_forwarded(self):
         if self.script_name != "sonic-courier.sh":

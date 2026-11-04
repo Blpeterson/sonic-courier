@@ -11,11 +11,16 @@ set "PROFILE_SET="
 set "TIMEOUT=60"
 set "TIMEOUT_SET="
 
+if "%~1"=="" goto interactive_menu
+
 :parse
 if "%~1"=="" goto validate
 set "ARG=%~1"
 if /I "%ARG%"=="-h" goto usage_success
 if /I "%ARG%"=="--help" goto usage_success
+if /I "%ARG%"=="--setup" goto set_setup
+if /I "%ARG%"=="--doctor" goto set_doctor
+if /I "%ARG%"=="--probe" goto set_probe
 if /I "%ARG%"=="-e" goto set_encode
 if /I "%ARG%"=="--encode" goto set_encode
 if /I "%ARG%"=="-d" goto set_decode
@@ -27,6 +32,24 @@ if /I "%ARG%"=="--timeout" goto set_timeout
 if "%ARG:~0,1%"=="-" goto unknown_option
 if defined INPUT_FILE goto too_many_files
 set "INPUT_FILE=%~1"
+shift
+goto parse
+
+:set_setup
+set "MODE=setup"
+shift
+goto parse
+
+:set_doctor
+set "MODE=doctor"
+shift
+goto parse
+
+:set_probe
+set "MODE=probe"
+shift
+if "%~1"=="" goto parse
+set "TIMEOUT=%~1"
 shift
 goto parse
 
@@ -81,7 +104,16 @@ set "PROFILE=ultrasonic"
 
 :validate_mode
 if /I "%MODE%"=="encode" goto validate_encode
+if /I "%MODE%"=="doctor" goto validate_diagnostic
+if /I "%MODE%"=="probe" goto validate_diagnostic
+if /I "%MODE%"=="setup" goto bootstrap_environment
 goto validate_decode
+
+:validate_diagnostic
+if defined INPUT_FILE goto diagnostic_file_invalid
+if defined OUTPUT_FILE goto diagnostic_file_invalid
+if defined PROFILE_SET goto diagnostic_file_invalid
+goto find_runner
 
 :validate_encode
 if not defined INPUT_FILE goto encode_file_missing
@@ -204,7 +236,30 @@ exit /b 127
 
 :execute
 if /I "%MODE%"=="encode" goto execute_encode
+if /I "%MODE%"=="doctor" goto execute_doctor
+if /I "%MODE%"=="probe" goto execute_probe
+if /I "%MODE%"=="setup" goto execute_setup
 goto execute_decode
+
+:execute_doctor
+if defined RUNNER_IS_PYTHON (
+    "%RUNNER%" -m sonic_courier doctor
+) else (
+    "%RUNNER%" doctor
+)
+exit /b %ERRORLEVEL%
+
+:execute_probe
+if defined RUNNER_IS_PYTHON (
+    "%RUNNER%" -m sonic_courier probe --seconds "%TIMEOUT%"
+) else (
+    "%RUNNER%" probe --seconds "%TIMEOUT%"
+)
+exit /b %ERRORLEVEL%
+
+:execute_setup
+echo [setup] Sonic Courier is ready.
+exit /b 0
 
 :execute_encode
 if defined PROFILE_SET goto execute_encode_fixed
@@ -283,6 +338,61 @@ goto usage_error
 echo error: --profile is only used with -e; receiving detects the profile automatically 1>&2
 goto usage_error
 
+:diagnostic_file_invalid
+echo error: diagnostic and setup modes cannot be combined with file options 1>&2
+goto usage_error
+
+:interactive_menu
+echo.
+echo Sonic Courier
+echo 1^) Receive a file ^(recommended defaults^)
+echo 2^) Send a file ^(automatic frequency handshake^)
+echo 3^) Check audio devices
+echo 4^) Test the microphone
+echo 5^) Install or repair Sonic Courier
+echo 6^) Show help
+set "MENU_CHOICE="
+set /p "MENU_CHOICE=Choose [1]: "
+if not defined MENU_CHOICE set "MENU_CHOICE=1"
+if "%MENU_CHOICE%"=="1" goto interactive_receive
+if "%MENU_CHOICE%"=="2" goto interactive_send
+if "%MENU_CHOICE%"=="3" (set "MODE=doctor" & goto validate)
+if "%MENU_CHOICE%"=="4" goto interactive_probe
+if "%MENU_CHOICE%"=="5" (set "MODE=setup" & goto validate)
+if "%MENU_CHOICE%"=="6" goto usage_success
+if /I "%MENU_CHOICE%"=="q" exit /b 0
+echo error: menu choice must be 1 through 6 1>&2
+exit /b 2
+
+:interactive_receive
+set /p "OUTPUT_FILE=Save received file as [received.bin]: "
+if not defined OUTPUT_FILE set "OUTPUT_FILE=received.bin"
+set "TIMEOUT="
+set /p "TIMEOUT=Listening timeout in seconds [120]: "
+if not defined TIMEOUT set "TIMEOUT=120"
+set "MODE=decode"
+goto validate
+
+:interactive_send
+set /p "INPUT_FILE=File to send: "
+if not defined INPUT_FILE goto encode_file_missing
+echo Frequency mode: 1^) Automatic ^(recommended^)  2^) Compatible  3^) Ultrasonic
+set "FREQUENCY_CHOICE="
+set /p "FREQUENCY_CHOICE=Choose [1]: "
+if not defined FREQUENCY_CHOICE set "FREQUENCY_CHOICE=1"
+if "%FREQUENCY_CHOICE%"=="2" (set "PROFILE=compatible" & set "PROFILE_SET=1")
+if "%FREQUENCY_CHOICE%"=="3" (set "PROFILE=ultrasonic" & set "PROFILE_SET=1")
+if not "%FREQUENCY_CHOICE%"=="1" if not "%FREQUENCY_CHOICE%"=="2" if not "%FREQUENCY_CHOICE%"=="3" goto profile_value_missing
+set "MODE=encode"
+goto validate
+
+:interactive_probe
+set "TIMEOUT="
+set /p "TIMEOUT=Microphone test length in seconds [5]: "
+if not defined TIMEOUT set "TIMEOUT=5"
+set "MODE=probe"
+goto validate
+
 :usage_error
 call :usage 1>&2
 exit /b 2
@@ -293,6 +403,8 @@ exit /b 0
 
 :usage
 echo Usage:
+echo   %SCRIPT_NAME%                         ^(interactive menu^)
+echo   %SCRIPT_NAME% --setup^|--doctor^|--probe [SECONDS]
 echo   %SCRIPT_NAME% -e INPUT_FILE [--profile compatible^|ultrasonic]
 echo   %SCRIPT_NAME% INPUT_FILE -e [--profile compatible^|ultrasonic]
 echo   %SCRIPT_NAME% -d -o OUTPUT_FILE [--timeout SECONDS]

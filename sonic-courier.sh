@@ -14,6 +14,7 @@ Usage:
 
 -e encodes, asks for confirmation, then plays through the default speaker.
 -d listens on the default microphone and writes the received file.
+Run without arguments for the mobile-friendly menu.
 EOF
 }
 
@@ -30,6 +31,58 @@ profile=compatible
 profile_set=false
 timeout=60
 timeout_set=false
+
+interactive_menu() {
+    printf '\n%s\n' 'Sonic Courier'
+    printf '%s\n' '1) Receive a file (recommended defaults)'
+    printf '%s\n' '2) Send a file (automatic frequency handshake)'
+    printf '%s\n' '3) Check audio devices'
+    printf '%s\n' '4) Test the microphone'
+    printf '%s\n' '5) Install or repair Sonic Courier'
+    printf '%s\n' '6) Show help'
+    printf '%s' 'Choose [1]: '
+    IFS= read -r choice || fail 'no menu selection was received'
+    choice=${choice:-1}
+    case $choice in
+        1)
+            printf '%s' 'Save received file as [received.bin]: '
+            IFS= read -r output_file || fail 'no output filename was received'
+            output_file=${output_file:-received.bin}
+            printf '%s' 'Listening timeout in seconds [120]: '
+            IFS= read -r timeout || fail 'no timeout was received'
+            timeout=${timeout:-120}
+            mode=decode
+            ;;
+        2)
+            printf '%s' 'File to send: '
+            IFS= read -r input_file || fail 'no input filename was received'
+            [ -n "$input_file" ] || fail 'a file to send is required'
+            printf '%s\n' 'Frequency mode: 1) Automatic (recommended)  2) Compatible  3) Ultrasonic'
+            printf '%s' 'Choose [1]: '
+            IFS= read -r frequency_choice || fail 'no frequency mode was received'
+            case ${frequency_choice:-1} in
+                1) ;;
+                2) profile=compatible; profile_set=true ;;
+                3) profile=ultrasonic; profile_set=true ;;
+                *) fail 'frequency mode must be 1, 2, or 3' ;;
+            esac
+            mode=encode
+            ;;
+        3) mode=doctor ;;
+        4)
+            printf '%s' 'Microphone test length in seconds [5]: '
+            IFS= read -r timeout || fail 'no test length was received'
+            timeout=${timeout:-5}
+            mode=probe
+            ;;
+        5) mode=setup ;;
+        6) usage; exit 0 ;;
+        q|Q) exit 0 ;;
+        *) fail 'menu choice must be 1 through 6' ;;
+    esac
+}
+
+[ "$#" -gt 0 ] || interactive_menu
 
 while [ "$#" -gt 0 ]; do
     case $1 in

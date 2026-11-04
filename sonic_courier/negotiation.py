@@ -30,6 +30,8 @@ CONTROL_REPETITIONS = 2
 CONTROL_MAGIC = b"SC"
 CONTROL_CANDIDATES = 1
 CONTROL_PLAN = 2
+CONTROL_FIXED_PLAN = 3
+CONTROL_READY = 4
 CONTROL_PACKET_SIZE = 8
 MINIMUM_PROFILE_SCORE_DB = 6.0
 
@@ -141,9 +143,22 @@ def _find_template(
     )[:output_size]
     numerator = convolution[reference.size - 1 : signal.size]
     cumulative = np.concatenate(([0.0], np.cumsum(signal**2)))
-    window_energy = cumulative[reference.size :] - cumulative[: -reference.size]
-    denominator = np.sqrt(window_energy * np.sum(reference**2)) + 1e-12
-    correlation = numerator / denominator
+    window_energy = np.maximum(
+        cumulative[reference.size :] - cumulative[: -reference.size], 0.0
+    )
+    denominator = np.sqrt(window_energy * np.sum(reference**2))
+    correlation = np.zeros_like(numerator)
+    # FFT convolution leaves tiny residuals even in entirely silent windows.
+    # Normalizing those by a near-zero denominator creates false chirps in
+    # silence before the real preamble has finished arriving. Require at least
+    # one PCM count of RMS energy, and also avoid negative round-off energies.
+    minimum_energy = reference.size / float(np.iinfo(np.int16).max) ** 2
+    np.divide(
+        numerator,
+        denominator,
+        out=correlation,
+        where=window_energy > minimum_energy,
+    )
     peak_index = int(np.argmax(correlation))
     peak = float(correlation[peak_index])
     if peak < minimum_correlation:
@@ -265,10 +280,12 @@ def choose_mutual_profile(
 
 
 def _packet(kind: int, profiles: tuple[ToneProfile, ...]) -> bytes:
-    if kind not in {CONTROL_CANDIDATES, CONTROL_PLAN}:
+    if kind not in {CONTROL_CANDIDATES, CONTROL_PLAN, CONTROL_FIXED_PLAN, CONTROL_READY}:
         raise ValueError("invalid control message kind")
     if not profiles or len(profiles) > 3:
         raise ValueError("control messages require one to three profiles")
+    if kind != CONTROL_CANDIDATES and len(profiles) != 1:
+        raise ValueError("frequency plans and ready messages require exactly one profile")
     step_units = round(profiles[0].step_frequency / 50.0)
     bases = [round(profile.base_frequency / 100.0) for profile in profiles]
     if not 1 <= step_units <= 255 or any(not 1 <= base <= 255 for base in bases):
@@ -285,14 +302,17 @@ def _parse_packet(packet: bytes) -> ControlMessage:
     if body[:2] != CONTROL_MAGIC or zlib.crc32(body) & 0xFF != checksum:
         raise NegotiationError("control packet checksum mismatch")
     kind, step_units, *bases = body[2:]
-    if kind not in {CONTROL_CANDIDATES, CONTROL_PLAN} or step_units == 0:
+    if (
+        kind not in {CONTROL_CANDIDATES, CONTROL_PLAN, CONTROL_FIXED_PLAN, CONTROL_READY}
+        or step_units == 0
+    ):
         raise NegotiationError("invalid control packet fields")
     profiles = tuple(
         ToneProfile(f"auto-{base * 100}", float(base * 100), float(step_units * 50))
         for base in bases
         if base
     )
-    if not profiles or kind == CONTROL_PLAN and len(profiles) != 1:
+    if not profiles or kind != CONTROL_CANDIDATES and len(profiles) != 1:
         raise NegotiationError("invalid number of negotiated profiles")
     return ControlMessage(kind, profiles)
 
@@ -326,7 +346,7 @@ def encode_control_message(
 
 
 def decode_control_message(
-    samples: NDArray[np.generic], sample_rate: int = SAMPLE_RATE
+    samples: NDArray[np.generic], sample_rate: int = SAMPLE_RATE, *, complete: bool = False
 ) -> ControlMessage:
     """Locate and decode either repeated copy of a control packet."""
     mono = np.asarray(samples, dtype=np.int16)
@@ -335,6 +355,8 @@ def decode_control_message(
     symbol_samples = round(sample_rate * CONTROL_SYMBOL_DURATION)
     body_start = preamble_start + preamble.size + round(sample_rate * CONTROL_GUARD_DURATION)
     symbols_per_packet = CONTROL_PACKET_SIZE * 4
+    if complete and body_start + CONTROL_REPETITIONS * symbols_per_packet * symbol_samples > mono.size:
+        raise NegotiationError("recording ended during the repeated control message")
     errors: list[Exception] = []
     for repetition in range(CONTROL_REPETITIONS):
         start = body_start + repetition * symbols_per_packet * symbol_samples

@@ -3,6 +3,10 @@ setlocal EnableExtensions DisableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_NAME=%~nx0"
+set "VENV_DIR=%SCRIPT_DIR%.venv"
+set "VENV_PYTHON=%SCRIPT_DIR%.venv\Scripts\python.exe"
+set "VENV_LAUNCHER=%SCRIPT_DIR%.venv\Scripts\sonic-courier.exe"
+set "CANCELLATION_SCRIPT=%SCRIPT_DIR%sonic_courier\cancellation.py"
 set "MODE="
 set "INPUT_FILE="
 set "OUTPUT_FILE="
@@ -137,6 +141,8 @@ set "VENV_LAUNCHER=%SCRIPT_DIR%.venv\Scripts\sonic-courier.exe"
 if not exist "%SCRIPT_DIR%.venv\Scripts\python.exe" goto bootstrap_environment
 "%SCRIPT_DIR%.venv\Scripts\python.exe" -c "import numpy, pyaudio" >nul 2>nul
 if errorlevel 1 goto bootstrap_environment
+"%VENV_PYTHON%" -c "import inspect; from sonic_courier.live import negotiate_sender; assert 'profile' in inspect.signature(negotiate_sender).parameters" >nul 2>nul
+if errorlevel 1 goto install_project
 if not exist "%VENV_LAUNCHER%" goto install_project
 "%VENV_LAUNCHER%" send --help 2>nul | findstr /C:"--confirm" >nul
 if errorlevel 1 goto install_project
@@ -187,30 +193,36 @@ if not errorlevel 1 goto create_with_python
 goto report_python_missing
 
 :create_with_python_override
-"%SONIC_COURIER_PYTHON%" -m venv --clear "%VENV_DIR%"
+"%SONIC_COURIER_PYTHON%" "%CANCELLATION_SCRIPT%" "%SONIC_COURIER_PYTHON%" -m venv --clear "%VENV_DIR%"
+if "%ERRORLEVEL%"=="130" exit /b 130
 if errorlevel 1 goto venv_failed
 goto install_project
 
 :create_with_py_launcher
-py -3 -m venv --clear "%VENV_DIR%"
+py -3 "%CANCELLATION_SCRIPT%" py -3 -m venv --clear "%VENV_DIR%"
+if "%ERRORLEVEL%"=="130" exit /b 130
 if errorlevel 1 goto venv_failed
 goto install_project
 
 :create_with_python3
-python3.exe -m venv --clear "%VENV_DIR%"
+python3.exe "%CANCELLATION_SCRIPT%" python3.exe -m venv --clear "%VENV_DIR%"
+if "%ERRORLEVEL%"=="130" exit /b 130
 if errorlevel 1 goto venv_failed
 goto install_project
 
 :create_with_python
-python.exe -m venv --clear "%VENV_DIR%"
+python.exe "%CANCELLATION_SCRIPT%" python.exe -m venv --clear "%VENV_DIR%"
+if "%ERRORLEVEL%"=="130" exit /b 130
 if errorlevel 1 goto venv_failed
 
 :install_project
 echo [setup] Installing Sonic Courier and live-audio support...
 pushd "%SCRIPT_DIR%" >nul
-"%VENV_PYTHON%" -m pip install --upgrade pip
+"%VENV_PYTHON%" "%CANCELLATION_SCRIPT%" "%VENV_PYTHON%" -m pip install --upgrade pip
+if "%ERRORLEVEL%"=="130" goto install_cancelled_popd
 if errorlevel 1 goto install_failed_popd
-"%VENV_PYTHON%" -m pip install --editable ".[live]"
+"%VENV_PYTHON%" "%CANCELLATION_SCRIPT%" "%VENV_PYTHON%" -m pip install --editable ".[live]"
+if "%ERRORLEVEL%"=="130" goto install_cancelled_popd
 if errorlevel 1 goto install_failed_popd
 popd
 if not exist "%VENV_LAUNCHER%" goto install_failed
@@ -221,6 +233,11 @@ goto use_local_launcher
 
 :install_failed_popd
 popd
+goto install_failed
+
+:install_cancelled_popd
+popd
+exit /b 130
 
 :install_failed
 echo error: automatic Sonic Courier installation failed 1>&2
@@ -272,9 +289,9 @@ exit /b %ERRORLEVEL%
 
 :execute_encode_fixed
 if defined RUNNER_IS_PYTHON (
-    "%RUNNER%" -m sonic_courier send "%INPUT_FILE%" --profile "%PROFILE%" --confirm
+    "%RUNNER%" -m sonic_courier send "%INPUT_FILE%" --auto --profile "%PROFILE%" --confirm
 ) else (
-    "%RUNNER%" send "%INPUT_FILE%" --profile "%PROFILE%" --confirm
+    "%RUNNER%" send "%INPUT_FILE%" --auto --profile "%PROFILE%" --confirm
 )
 exit /b %ERRORLEVEL%
 
@@ -345,8 +362,9 @@ goto usage_error
 :interactive_menu
 echo.
 echo Sonic Courier
+echo Press q at a prompt, during audio, or during Python setup to cancel.
 echo 1^) Receive a file ^(recommended defaults^)
-echo 2^) Send a file ^(automatic frequency handshake^)
+echo 2^) Send a file ^(wait for receiver handshake^)
 echo 3^) Check audio devices
 echo 4^) Test the microphone
 echo 5^) Install or repair Sonic Courier
@@ -366,19 +384,24 @@ exit /b 2
 
 :interactive_receive
 set /p "OUTPUT_FILE=Save received file as [received.bin]: "
+if /I "%OUTPUT_FILE%"=="q" exit /b 0
 if not defined OUTPUT_FILE set "OUTPUT_FILE=received.bin"
 set "TIMEOUT="
 set /p "TIMEOUT=Listening timeout in seconds [120]: "
+if /I "%TIMEOUT%"=="q" exit /b 0
 if not defined TIMEOUT set "TIMEOUT=120"
 set "MODE=decode"
 goto validate
 
 :interactive_send
 set /p "INPUT_FILE=File to send: "
+if /I "%INPUT_FILE%"=="q" exit /b 0
 if not defined INPUT_FILE goto encode_file_missing
-echo Frequency mode: 1^) Automatic ^(recommended^)  2^) Compatible  3^) Ultrasonic
+echo File tone band: 1^) Automatic ^(recommended^)  2^) Compatible  3^) Ultrasonic
+echo Every mode waits/retries for the receiver before sending the file.
 set "FREQUENCY_CHOICE="
 set /p "FREQUENCY_CHOICE=Choose [1]: "
+if /I "%FREQUENCY_CHOICE%"=="q" exit /b 0
 if not defined FREQUENCY_CHOICE set "FREQUENCY_CHOICE=1"
 if "%FREQUENCY_CHOICE%"=="2" (set "PROFILE=compatible" & set "PROFILE_SET=1")
 if "%FREQUENCY_CHOICE%"=="3" (set "PROFILE=ultrasonic" & set "PROFILE_SET=1")
@@ -389,6 +412,7 @@ goto validate
 :interactive_probe
 set "TIMEOUT="
 set /p "TIMEOUT=Microphone test length in seconds [5]: "
+if /I "%TIMEOUT%"=="q" exit /b 0
 if not defined TIMEOUT set "TIMEOUT=5"
 set "MODE=probe"
 goto validate
@@ -409,6 +433,8 @@ echo   %SCRIPT_NAME% -e INPUT_FILE [--profile compatible^|ultrasonic]
 echo   %SCRIPT_NAME% INPUT_FILE -e [--profile compatible^|ultrasonic]
 echo   %SCRIPT_NAME% -d -o OUTPUT_FILE [--timeout SECONDS]
 echo.
-echo -e encodes, asks for confirmation, then plays through the default speaker.
+echo -e encodes, asks for permission to play, then waits/retries for a receiver handshake.
+echo --profile fixes the file's tone band; the receiver handshake is still required.
 echo -d listens on the default microphone and writes the received file.
+echo Press q during audio or Python setup tasks to cancel; Ctrl+C also cancels.
 exit /b 0

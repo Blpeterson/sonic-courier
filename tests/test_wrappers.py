@@ -1,7 +1,10 @@
 import os
+import queue
 import stat
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -84,17 +87,20 @@ class _WrapperContract:
             ["send", str(source), "--auto", "--confirm"],
         )
 
-    def test_encode_can_force_a_fixed_profile(self):
+    def test_fixed_profiles_keep_the_receiver_handshake(self):
         source = self.temp / "fixed.bin"
         source.write_bytes(b"test")
 
-        result = self._run("-e", str(source), "--profile", "ultrasonic")
+        for profile in ("compatible", "ultrasonic"):
+            with self.subTest(profile=profile):
+                self.arguments_file.unlink(missing_ok=True)
+                result = self._run("-e", str(source), "--profile", profile)
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            self._forwarded_arguments(),
-            ["send", str(source), "--profile", "ultrasonic", "--confirm"],
-        )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    self._forwarded_arguments(),
+                    ["send", str(source), "--auto", "--profile", profile, "--confirm"],
+                )
 
     def test_decode_forwards_exact_output_and_timeout(self):
         output = self.temp / "received file.bin"
@@ -154,6 +160,133 @@ class _WrapperContract:
 class WindowsWrapperTests(_WrapperContract, unittest.TestCase):
     script_name = "sonic-courier.cmd"
 
+    def test_setup_cancellation_stops_before_environment_creation(self):
+        # A stand-in supervisor cancels before executing venv, so this verifies
+        # --setup's paths and exit handling without changing the real .venv.
+        copied_script = self.temp / self.script_name
+        copied_script.write_text(
+            (PROJECT_ROOT / self.script_name).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        package = self.temp / "sonic_courier"
+        package.mkdir()
+        (package / "cancellation.py").write_text(
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['SONIC_COURIER_TEST_ARGS']).write_text("
+            "'\\n'.join(sys.argv[1:]), encoding='utf-8')\n"
+            "raise SystemExit(130)\n",
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SONIC_COURIER_PYTHON": sys.executable,
+                "SONIC_COURIER_TEST_ARGS": str(self.arguments_file),
+            }
+        )
+        result = subprocess.run(
+            [
+                os.environ.get("COMSPEC", "cmd.exe"),
+                "/d",
+                "/c",
+                "call",
+                str(copied_script),
+                "--setup",
+            ],
+            cwd=self.temp,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 130, result.stdout + result.stderr)
+        self.assertEqual(
+            self._forwarded_arguments(),
+            [sys.executable, "-m", "venv", "--clear", str(self.temp / ".venv")],
+        )
+        self.assertFalse((self.temp / ".venv").exists())
+
+    def test_ultrasonic_menu_keeps_the_receiver_handshake(self):
+        source = self.temp / "menu file with spaces.bin"
+        source.write_bytes(b"menu payload")
+        self._answer_menu(
+            [
+                ("Choose [1]: ", "2"),
+                ("File to send: ", str(source)),
+                ("Choose [1]: ", "3"),
+            ]
+        )
+        self.assertEqual(
+            self._forwarded_arguments(),
+            ["send", str(source), "--auto", "--profile", "ultrasonic", "--confirm"],
+        )
+
+    def test_q_cancels_at_every_menu_prompt_before_starting_audio(self):
+        paths = (
+            [("Choose [1]: ", "q")],
+            [("Choose [1]: ", "2"), ("File to send: ", "Q")],
+            [
+                ("Choose [1]: ", "2"),
+                ("File to send: ", "unused.bin"),
+                ("Choose [1]: ", "q"),
+            ],
+            [("Choose [1]: ", "1"), ("Save received file as [received.bin]: ", "q")],
+            [
+                ("Choose [1]: ", "1"),
+                ("Save received file as [received.bin]: ", "unused.bin"),
+                ("Listening timeout in seconds [120]: ", "q"),
+            ],
+            [("Choose [1]: ", "4"), ("Microphone test length in seconds [5]: ", "q")],
+        )
+        for answers in paths:
+            with self.subTest(answers=answers):
+                self._answer_menu(answers)
+                self.assertFalse(self.arguments_file.exists())
+
+    def _answer_menu(self, answers: list[tuple[str, str]]):
+        # Feed each answer after its prompt. cmd.exe's set /p may discard later
+        # lines if all answers are written to its input pipe at once.
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SONIC_COURIER_EXECUTABLE": str(self.fake_runner),
+                "SONIC_COURIER_TEST_ARGS": str(self.arguments_file),
+                "SONIC_COURIER_TEST_EXIT": "0",
+            }
+        )
+        received: queue.Queue[str] = queue.Queue()
+        with subprocess.Popen(
+            self._wrapper_command([]),
+            cwd=self.temp,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        ) as process:
+            def collect_output():
+                for character in iter(lambda: process.stdout.read(1), ""):
+                    received.put(character)
+
+            reader = threading.Thread(target=collect_output, daemon=True)
+            reader.start()
+            try:
+                for prompt, answer in answers:
+                    output = ""
+                    while not output.endswith(prompt):
+                        output += received.get(timeout=10)
+                    process.stdin.write(answer + "\n")
+                    process.stdin.flush()
+                self.assertEqual(process.wait(timeout=10), 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10)
+                reader.join(timeout=10)
+
     def _create_fake_runner(self) -> Path:
         runner = self.temp / "fake courier.cmd"
         runner.write_text(
@@ -184,6 +317,20 @@ class WindowsWrapperTests(_WrapperContract, unittest.TestCase):
 @unittest.skipUnless(os.name == "posix", "POSIX shell wrapper test")
 class PosixWrapperTests(_WrapperContract, unittest.TestCase):
     script_name = "sonic-courier.sh"
+
+    def test_q_cancels_at_every_menu_prompt_before_starting_audio(self):
+        for answers in (
+            "q\n",
+            "2\nQ\n",
+            "2\nunused.bin\nq\n",
+            "1\nq\n",
+            "1\nunused.bin\nq\n",
+            "4\nq\n",
+        ):
+            with self.subTest(answers=answers):
+                result = self._run(input_text=answers)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(self.arguments_file.exists())
 
     def _create_fake_runner(self) -> Path:
         runner = self.temp / "fake courier"

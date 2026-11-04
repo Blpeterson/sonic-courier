@@ -21,6 +21,7 @@ from .audio import (
     match_tone_profile,
     resolve_tone_profile,
 )
+from .cancellation import check_cancelled
 
 MAGIC = b"SC01"
 HEADER = struct.Struct(">4sQIH")  # magic, payload length, CRC-32, UTF-8 filename length
@@ -103,14 +104,15 @@ def modulate(
         generate_sine_wave(tone_profile.base_frequency, PREAMBLE_DURATION, sample_rate),
         generate_sine_wave(tone_profile.high_preamble_frequency, PREAMBLE_DURATION, sample_rate),
     ]
-    parts.extend(
-        generate_sine_wave(
-            tone_profile.base_frequency + (nibble + 1) * tone_profile.step_frequency,
-            SYMBOL_DURATION,
-            sample_rate,
+    for nibble in bytes_to_nibbles(frame):
+        check_cancelled()
+        parts.append(
+            generate_sine_wave(
+                tone_profile.base_frequency + (nibble + 1) * tone_profile.step_frequency,
+                SYMBOL_DURATION,
+                sample_rate,
+            )
         )
-        for nibble in bytes_to_nibbles(frame)
-    )
     return np.concatenate(parts)
 
 
@@ -234,6 +236,7 @@ def demodulate(
     expected_symbols: int | None = None
     trim = round(symbol_samples * 0.10)
     for index in range(available_symbols):
+        check_cancelled()
         offset = round(payload_start + index * symbol_samples)
         end = round(payload_start + (index + 1) * symbol_samples)
         chunk = mono[offset + trim : min(end - trim, mono.size)]

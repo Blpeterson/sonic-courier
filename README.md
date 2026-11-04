@@ -203,7 +203,7 @@ git pull
 ./.venv/bin/sonic-courier doctor
 ```
 
-The version command should print `sonic-courier 1.2.1`. To confirm the repaired
+The version command should print `sonic-courier 1.3.0`. To confirm the repaired
 NumPy version without starting Sonic Courier:
 
 ```bash
@@ -257,7 +257,8 @@ The input file can also precede the encode flag, such as
 The receiver writes exactly the filename supplied to `-o`, including a filename
 without an extension. Either side can be launched first: the sender repeats its
 sounding attempt until the receiver responds. Once both are running, the
-adaptive handshake normally takes about ten seconds.
+handshake normally takes about 15 seconds. The sender retries for up to 60
+seconds by default; the full CLI's `--handshake-timeout` changes that limit.
 
 By default, the scripts measure background noise, sweep 4-19 kHz in both
 directions, exchange three candidate bands over a repeated 3-6 kHz control
@@ -265,8 +266,18 @@ channel, and confirm the highest mutually reliable range before transferring
 the file. Chirp correlation, per-frequency signal-to-noise scoring, repeated
 control packets, and CRC checks protect the handshake from background sound.
 
-Add `--profile compatible` or `--profile ultrasonic` to `-e` to bypass adaptive
-negotiation and force a fixed band. The receiver's default handshake timeout is
+Add `--profile compatible` or `--profile ultrasonic` to `-e` to force the file's
+data band while retaining the receiver handshake. All menu modes and wrapper
+send modes wait for a matching READY reply before playing the file, retrying if
+no reply arrives. Fixed modes confirm the receiver is listening; they do not
+measure whether its hardware can capture every tone in the chosen fixed band.
+The audible 3–6 kHz handshake still runs in ultrasonic mode.
+
+Update **both devices** to 1.3.0 or later: older receivers do not send the new
+READY reply. A completed handshake confirms readiness, not successful delivery
+of the file. The receiving device reports recovery only after its CRC passes.
+
+The receiver's default handshake timeout is
 60 seconds; change it with `--timeout`, for example:
 
 ```bash
@@ -276,7 +287,7 @@ negotiation and force a fixed band. The receiver's default handshake timeout is
 ### Diagnose Linux microphone access
 
 ALSA and JACK may print many warnings while PortAudio probes optional legacy
-devices. Sonic Courier 1.2.1 hides that probe noise while still reporting real
+devices. Sonic Courier 1.3.0 hides that probe noise while still reporting real
 stream failures. Set `SONIC_COURIER_AUDIO_DEBUG=1` only when the native backend
 messages are needed.
 
@@ -325,6 +336,13 @@ default first option receives a file using automatic frequency negotiation,
 saves it as `received.bin`, and waits up to 120 seconds. Windows has the same
 guided menu when `sonic-courier.cmd` is run without arguments.
 
+At any menu prompt, type `q` and press Enter to quit. During live sending,
+receiving, microphone testing, or Python environment installation, press `q`
+without Enter to cancel. Audio streams close and setup child processes stop;
+`Ctrl+C` also works. During Linux system-package installation or sudo password
+entry, use `Ctrl+C`. These single-key controls require an interactive terminal;
+redirected commands can still be stopped with `Ctrl+C`.
+
 Use two computers for the clearest test. Install Sonic Courier on both, put them
 close together, start at low speaker volume, and disable noise suppression or
 "audio enhancements" if possible.
@@ -364,7 +382,10 @@ The receiver writes `received\photo.jpg` only after its length and CRC-32 pass.
 The full `encode` and `send` commands use the `compatible` fixed profile by
 default. Add `--profile ultrasonic` for the original near-ultrasonic band, or
 use `send --auto` together with `listen --auto` for the same adaptive handshake
-used by the wrapper scripts. WAV decoding detects both fixed profiles
+used by the wrapper scripts. `send --auto --profile ultrasonic` selects a fixed
+band and still waits for receiver readiness. A full CLI `send --profile`
+without `--auto` retains the legacy one-shot behavior and must be paired with
+`listen` without `--auto`. WAV decoding detects both fixed profiles
 automatically.
 
 Start with a tiny text file: throughput is about 12.5 bytes per second, and many

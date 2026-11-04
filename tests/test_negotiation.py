@@ -3,11 +3,13 @@ from unittest.mock import patch
 
 import numpy as np
 
-from sonic_courier.audio import SAMPLE_RATE, ToneProfile
-from sonic_courier.live import negotiate_receiver, negotiate_sender
+from sonic_courier.audio import SAMPLE_RATE, ULTRASONIC_PROFILE, ToneProfile
+from sonic_courier.live import LiveAudioError, negotiate_receiver, negotiate_sender
 from sonic_courier.negotiation import (
     CONTROL_CANDIDATES,
+    CONTROL_FIXED_PLAN,
     CONTROL_PLAN,
+    CONTROL_READY,
     SOUNDING_FREQUENCIES,
     analyze_sounding_sweep,
     decode_control_message,
@@ -92,7 +94,14 @@ class NegotiationTests(unittest.TestCase):
 
         with (
             patch("sonic_courier.live.play", side_effect=played.append),
-            patch("sonic_courier.live.record_audio", return_value=response),
+            patch(
+                "sonic_courier.live.record_audio",
+                side_effect=lambda _duration, **kwargs: response
+                if len(played) == 1
+                else encode_control_message(
+                    CONTROL_READY, decode_control_message(played[-1]).profiles
+                ),
+            ),
         ):
             profile = negotiate_sender(timeout=1.0, status=lambda _message: None)
 
@@ -115,10 +124,69 @@ class NegotiationTests(unittest.TestCase):
             profile = negotiate_receiver(timeout=1.0, status=lambda _message: None)
 
         self.assertEqual(profile, candidates[0])
-        self.assertEqual(len(played), 1)
+        self.assertEqual(len(played), 2)
         proposal = decode_control_message(played[0])
         self.assertEqual(proposal.kind, CONTROL_CANDIDATES)
         self.assertEqual(proposal.profiles, candidates)
+        ready = decode_control_message(played[1])
+        self.assertEqual(ready.kind, CONTROL_READY)
+        self.assertEqual(ready.profiles, (profile,))
+
+    def test_fixed_ultrasonic_handshake_waits_and_retries_until_ready(self):
+        candidates = rank_candidate_profiles(analyze_sounding_sweep(generate_sounding_sweep()))
+        response = np.concatenate((
+            encode_control_message(CONTROL_CANDIDATES, candidates),
+            generate_sounding_sweep(),
+        ))
+        silence = np.zeros(SAMPLE_RATE, dtype=np.int16)
+        wrong_ready = encode_control_message(CONTROL_READY, (candidates[0],))
+        ready = encode_control_message(CONTROL_READY, (ULTRASONIC_PROFILE,))
+        played = []
+        statuses = []
+        with (
+            patch("sonic_courier.live.play", side_effect=played.append),
+            patch("sonic_courier.live.record_audio", side_effect=(
+                silence, response, wrong_ready, silence, ready,
+            )),
+        ):
+            result = negotiate_sender(profile=ULTRASONIC_PROFILE, status=statuses.append)
+
+        self.assertEqual(result, ULTRASONIC_PROFILE)
+        self.assertTrue(any("Handshake attempt 2" in status for status in statuses))
+        plans = [decode_control_message(audio) for audio in played[2:]]
+        self.assertEqual(len(plans), 3)
+        self.assertTrue(all(plan.kind == CONTROL_FIXED_PLAN for plan in plans))
+        self.assertTrue(all(
+            plan.profiles[0].base_frequency == ULTRASONIC_PROFILE.base_frequency for plan in plans
+        ))
+
+    def test_receiver_accepts_fixed_ultrasonic_override_and_returns_ready(self):
+        sounding = generate_sounding_sweep()
+        request = encode_control_message(CONTROL_FIXED_PLAN, (ULTRASONIC_PROFILE,))
+        played = []
+        with (
+            patch("sonic_courier.live.play", side_effect=played.append),
+            patch("sonic_courier.live.record_audio", side_effect=(sounding, request)),
+        ):
+            result = negotiate_receiver(timeout=1.0, status=lambda _message: None)
+        self.assertEqual(result.base_frequency, 17_000)
+        self.assertEqual(result.step_frequency, 250)
+        self.assertEqual(decode_control_message(played[-1]).kind, CONTROL_READY)
+
+    def test_sender_does_not_succeed_without_receiver_ready(self):
+        response = np.concatenate((
+            encode_control_message(CONTROL_CANDIDATES, (ULTRASONIC_PROFILE,)),
+            generate_sounding_sweep(),
+        ))
+        with (
+            patch("sonic_courier.live.play"),
+            patch("sonic_courier.live.record_audio", side_effect=(
+                response, np.zeros(SAMPLE_RATE, np.int16),
+            )),
+            patch("sonic_courier.live.time.monotonic", side_effect=(0, 0, 40, 40)),
+            self.assertRaisesRegex(LiveAudioError, "no receiver handshake completed"),
+        ):
+            negotiate_sender(profile=ULTRASONIC_PROFILE, status=lambda _msg: None)
 
 
 if __name__ == "__main__":

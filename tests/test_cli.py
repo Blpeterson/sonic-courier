@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from sonic_courier.audio import ToneProfile
+from sonic_courier.audio import ULTRASONIC_PROFILE, ToneProfile
+from sonic_courier.cancellation import CancelledError
 from sonic_courier.cli import main
 from sonic_courier.live import AudioDeviceSummary, LiveAudioError
 from sonic_courier.protocol import build_frame, demodulate, modulate
@@ -202,6 +203,38 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("does not exist", result.stderr)
+
+    def test_ultrasonic_auto_send_does_not_play_when_handshake_times_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "test.txt"
+            source.write_bytes(b"test")
+            with (
+                patch("builtins.input", return_value="y"),
+                patch("sonic_courier.cli.negotiate_sender", side_effect=LiveAudioError(
+                    "no receiver handshake completed"
+                )) as negotiate,
+                patch("sonic_courier.cli.play") as play,
+                redirect_stdout(StringIO()),
+                redirect_stderr(StringIO()),
+            ):
+                result = main(["send", str(source), "--auto", "--profile", "ultrasonic", "--confirm"])
+            self.assertEqual(result, 1)
+            negotiate.assert_called_once_with(timeout=60.0, profile=ULTRASONIC_PROFILE)
+            play.assert_not_called()
+
+    def test_cancelled_receive_returns_without_writing_a_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "received.bin"
+            with (
+                patch("sonic_courier.cli.negotiate_receiver", side_effect=CancelledError),
+                patch("sonic_courier.cli.record_transmission") as record,
+                redirect_stdout(StringIO()),
+                redirect_stderr(StringIO()),
+            ):
+                result = main(["listen", "--auto", "--output-file", str(destination)])
+            self.assertEqual(result, 130)
+            record.assert_not_called()
+            self.assertFalse(destination.exists())
 
 
 if __name__ == "__main__":

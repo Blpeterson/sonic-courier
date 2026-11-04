@@ -19,6 +19,7 @@ from .audio import (
     resolve_tone_profile,
     write_wav,
 )
+from .cancellation import CancelledError, check_cancelled, keyboard_cancellation
 from .live import (
     LiveAudioError,
     inspect_devices,
@@ -69,23 +70,22 @@ def build_parser() -> argparse.ArgumentParser:
     send = commands.add_parser("send", help="encode and play a file through the default speaker")
     send.add_argument("input", type=Path, help="file to transmit")
     send.add_argument("--save", type=Path, help="also save the generated WAV")
-    send_transport = send.add_mutually_exclusive_group()
-    send_transport.add_argument(
+    send.add_argument(
         "--profile",
         choices=TONE_PROFILES,
-        help="use a fixed tone range instead of negotiating automatically",
+        help="fixed data band; combine with --auto to wait for receiver confirmation",
     )
-    send_transport.add_argument(
+    send.add_argument(
         "--auto",
         action="store_true",
-        help="negotiate a noise-aware frequency range with the receiver",
+        help="handshake and retry until the receiver confirms (also works with --profile)",
     )
     send.add_argument(
         "--confirm",
         action="store_true",
         help="encode first, then ask before playing sound",
     )
-    send.add_argument("--handshake-timeout", type=float, default=30.0)
+    send.add_argument("--handshake-timeout", type=float, default=60.0)
 
     decode = commands.add_parser("decode", help="decode a transmission WAV")
     decode.add_argument("input", type=Path, help="16-bit PCM WAV to decode")
@@ -119,7 +119,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "probe":
             print(f"Recording {args.seconds:g} seconds from the default microphone...")
-            samples = record_audio(args.seconds)
+            print("Press Q to cancel (Ctrl+C also works).")
+            with keyboard_cancellation():
+                samples = record_audio(args.seconds)
             absolute = np.abs(samples.astype(np.int32))
             rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
             peak = int(np.max(absolute)) if absolute.size else 0
@@ -146,7 +148,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"({DEFAULT_TONE_PROFILE.name}) [OK]"
             )
             try:
-                devices = inspect_devices()
+                print("Press Q to cancel (Ctrl+C also works).")
+                with keyboard_cancellation():
+                    devices = inspect_devices()
+                    check_cancelled()
             except LiveAudioError as exc:
                 print(f"Live audio: NOT READY ({exc})")
                 print("Install it with: python -m pip install '.[live]'")
@@ -172,7 +177,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command in {"encode", "send"}:
             profile = resolve_tone_profile(args.profile)
-            samples, size = _encode(args.input, profile)
+            print("Press Q to cancel (Ctrl+C also works).")
+            with keyboard_cancellation():
+                samples, size = _encode(args.input, profile)
+                check_cancelled()
             destination = args.output if args.command == "encode" else args.save
             if args.command == "encode" and destination is None:
                 destination = args.input.with_suffix(args.input.suffix + ".wav")
@@ -196,18 +204,28 @@ def main(argv: list[str] | None = None) -> int:
                 if confirmed not in {"y", "yes"}:
                     print("Playback cancelled; no sound was played.")
                     return 0
-            if args.command == "send" and args.auto:
-                print("Starting the adaptive acoustic handshake...")
-                profile = negotiate_sender(timeout=args.handshake_timeout)
-                samples, size = _encode(args.input, profile)
-                print(
-                    f"Re-encoded {size} bytes for the negotiated band "
-                    f"({len(samples) / 44_100:.2f} seconds)."
-                )
-                time.sleep(1.0)
             if args.command == "send" or args.play:
-                print("Playing transmission...")
-                play(samples)
+                print("Press Q to cancel (Ctrl+C also works).")
+                with keyboard_cancellation():
+                    if args.command == "send" and args.auto:
+                        print("Starting the receiver handshake; retrying until it responds...")
+                        requested = resolve_tone_profile(args.profile) if args.profile else None
+                        profile = negotiate_sender(timeout=args.handshake_timeout, profile=requested)
+                        samples, size = _encode(args.input, profile)
+                        if destination:
+                            write_wav(destination, samples)
+                        print(
+                            f"Encoded {size} bytes for the confirmed band "
+                            f"({len(samples) / 44_100:.2f} seconds)."
+                        )
+                        for _ in range(10):
+                            check_cancelled()
+                            time.sleep(0.1)
+                    check_cancelled()
+                    print("Playing transmission...")
+                    play(samples)
+                    if args.command == "send":
+                        print("Playback finished. File receipt has not been verified.")
             return 0
 
         if args.command == "decode":
@@ -216,17 +234,22 @@ def main(argv: list[str] | None = None) -> int:
             exact_output = False
             negotiated_profile = None
         else:
-            negotiated_profile = (
-                negotiate_receiver(timeout=args.timeout) if args.auto else None
-            )
-            samples = record_transmission(
-                timeout=args.timeout,
-                profile=negotiated_profile,
-            )
+            print("Press Q to cancel (Ctrl+C also works).")
+            with keyboard_cancellation():
+                negotiated_profile = (
+                    negotiate_receiver(timeout=args.timeout) if args.auto else None
+                )
+                samples = record_transmission(
+                    timeout=args.timeout,
+                    profile=negotiated_profile,
+                    handshake=args.auto,
+                )
             rate = 44_100
             exact_output = args.output_file is not None
             output = args.output_file if exact_output else args.output
-        decoded = demodulate(samples, rate, profile=negotiated_profile)
+        with keyboard_cancellation():
+            decoded = demodulate(samples, rate, profile=negotiated_profile)
+            check_cancelled()
         destination = _safe_output(output, decoded.filename, exact=exact_output)
         destination.write_bytes(decoded.data)
         print(
@@ -234,6 +257,9 @@ def main(argv: list[str] | None = None) -> int:
             f"(calibration {decoded.measured_low:.1f}/{decoded.measured_high:.1f} Hz)"
         )
         return 0
+    except (CancelledError, KeyboardInterrupt):
+        print("\nCancelled.", file=sys.stderr)
+        return 130
     except (FileNotFoundError, OSError, ValueError, ProtocolError, LiveAudioError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -19,10 +19,13 @@ from .audio import (
     find_dominant_frequency,
     match_tone_profile,
 )
+from .cancellation import CancelledError, check_cancelled
 from .negotiation import (
     CONTROL_CANDIDATES,
     CONTROL_DURATION,
+    CONTROL_FIXED_PLAN,
     CONTROL_PLAN,
+    CONTROL_READY,
     SOUNDING_DURATION,
     NegotiationError,
     analyze_sounding_sweep,
@@ -147,7 +150,13 @@ def play(samples: NDArray[np.int16], sample_rate: int = SAMPLE_RATE) -> None:
                 output=True,
                 output_device_index=_configured_device("output"),
             )
-        stream.write(np.asarray(samples, dtype="<i2").tobytes())
+        values = np.asarray(samples, dtype="<i2")
+        # Short writes let Q stop playback before the whole file is queued.
+        for offset in range(0, values.size, 1024):
+            check_cancelled()
+            stream.write(values[offset : offset + 1024].tobytes())
+    except CancelledError:
+        raise
     except Exception as exc:
         raise LiveAudioError(f"audio playback failed: {exc}") from exc
     finally:
@@ -157,8 +166,13 @@ def play(samples: NDArray[np.int16], sample_rate: int = SAMPLE_RATE) -> None:
         audio.terminate()
 
 
-def record_audio(duration: float, sample_rate: int = SAMPLE_RATE) -> NDArray[np.int16]:
-    """Record a fixed-duration mono clip from the default microphone."""
+def record_audio(
+    duration: float,
+    sample_rate: int = SAMPLE_RATE,
+    *,
+    detect: Callable[[NDArray[np.int16]], object] | None = None,
+) -> NDArray[np.int16]:
+    """Record mono PCM, optionally stopping when a detector accepts the rolling buffer."""
     if duration <= 0:
         raise ValueError("duration must be positive")
     pyaudio = _pyaudio()
@@ -167,6 +181,9 @@ def record_audio(duration: float, sample_rate: int = SAMPLE_RATE) -> NDArray[np.
     chunk_size = 1024
     remaining = round(duration * sample_rate)
     captured: list[NDArray[np.int16]] = []
+    next_detection = 0
+    captured_samples = 0
+    buffer_samples = round(sample_rate * 8.0)
     try:
         with _quiet_native_audio_errors():
             stream = audio.open(
@@ -178,10 +195,26 @@ def record_audio(duration: float, sample_rate: int = SAMPLE_RATE) -> NDArray[np.
                 frames_per_buffer=chunk_size,
             )
         while remaining > 0:
+            check_cancelled()
             count = min(chunk_size, remaining)
             raw = stream.read(count, exception_on_overflow=False)
             captured.append(np.frombuffer(raw, dtype="<i2").copy())
             remaining -= count
+            if detect is not None:
+                captured_samples += count
+                while captured_samples > buffer_samples and len(captured) > 1:
+                    captured_samples -= captured.pop(0).size
+                next_detection -= count
+                if next_detection <= 0:
+                    next_detection = round(sample_rate * 0.20)
+                    try:
+                        detect(np.concatenate(captured))
+                    except NegotiationError:
+                        pass
+                    else:
+                        break
+    except CancelledError:
+        raise
     except Exception as exc:
         raise LiveAudioError(f"microphone capture failed: {exc}") from exc
     finally:
@@ -192,38 +225,91 @@ def record_audio(duration: float, sample_rate: int = SAMPLE_RATE) -> NDArray[np.
     return np.concatenate(captured)
 
 
+HANDSHAKE_TURNAROUND = 0.50
+
+
+def _play_handshake(samples: NDArray[np.int16]) -> None:
+    # Leave time for the peer to switch from playback to microphone capture.
+    play(np.concatenate((np.zeros(round(SAMPLE_RATE * HANDSHAKE_TURNAROUND), np.int16), samples)))
+
+
+def _same_profile(left: ToneProfile, right: ToneProfile) -> bool:
+    return (
+        abs(left.base_frequency - right.base_frequency) < 1.0
+        and abs(left.step_frequency - right.step_frequency) < 1.0
+    )
+
+
+def _ready_message(recording: NDArray[np.int16], profile: ToneProfile):
+    message = decode_control_message(recording, complete=True)
+    if message.kind != CONTROL_READY or not _same_profile(message.profiles[0], profile):
+        raise NegotiationError("receiver did not confirm the selected frequency plan")
+    return message
+
+
 def negotiate_sender(
     *,
     timeout: float = 30.0,
+    profile: ToneProfile | None = None,
     status: Callable[[str], None] = print,
 ) -> ToneProfile:
-    """Sound the channel, measure the reverse path, and announce the final plan."""
+    """Sound the channel and wait for the receiver to acknowledge the final plan."""
+    if timeout <= 0:
+        raise ValueError("handshake timeout must be positive")
     deadline = time.monotonic() + timeout
     sweep = generate_sounding_sweep()
-    # The receiver may finish a partially elapsed capture window before it can
-    # answer, so retain generous headroom ahead of the response waveform.
-    response_duration = CONTROL_DURATION + 0.15 + SOUNDING_DURATION + 1.80
+    # Allow capture startup, turnaround guards and processing on slower peers.
+    response_duration = CONTROL_DURATION + 0.15 + SOUNDING_DURATION + 2.5
+    requested_profile = profile
+    if requested_profile is not None and not any(
+        _same_profile(requested_profile, fixed) for fixed in TONE_PROFILES.values()
+    ):
+        raise ValueError("a fixed handshake requires a compatible or ultrasonic profile")
+
+    def response_complete(recording):
+        message = decode_control_message(recording, complete=True)
+        if message.kind != CONTROL_CANDIDATES:
+            raise NegotiationError("expected receiver frequency candidates")
+        analyze_sounding_sweep(recording)
+        return message
+
     attempt = 0
     while time.monotonic() < deadline:
+        check_cancelled()
         attempt += 1
         status(f"Handshake attempt {attempt}: sounding the channel...")
-        play(sweep)
-        response = record_audio(response_duration)
+        _play_handshake(sweep)
+        response = record_audio(response_duration, detect=response_complete)
         try:
             message = decode_control_message(response)
             if message.kind != CONTROL_CANDIDATES:
                 raise NegotiationError("expected receiver frequency candidates")
             reverse_result = analyze_sounding_sweep(response)
-            profile = choose_mutual_profile(message.profiles, reverse_result)
+            profile = requested_profile or choose_mutual_profile(message.profiles, reverse_result)
         except NegotiationError as exc:
             status(f"No complete receiver response yet ({exc}); retrying...")
             continue
         status(
-            f"Negotiated {profile.first_data_frequency / 1000:g}-"
+            f"Selected {profile.first_data_frequency / 1000:g}-"
             f"{profile.last_data_frequency / 1000:g} kHz; confirming..."
         )
-        play(encode_control_message(CONTROL_PLAN, (profile,)))
-        return profile
+        kind = CONTROL_FIXED_PLAN if requested_profile is not None else CONTROL_PLAN
+        for confirmation_attempt in range(1, 4):
+            if confirmation_attempt > 1 and time.monotonic() >= deadline:
+                break
+            status(f"Waiting for receiver readiness (confirmation {confirmation_attempt}/3)...")
+            _play_handshake(encode_control_message(kind, (profile,)))
+            ready = record_audio(
+                CONTROL_DURATION + 2.0,
+                detect=lambda clip, selected=profile: _ready_message(clip, selected),
+            )
+            try:
+                _ready_message(ready, profile)
+            except NegotiationError as exc:
+                status(f"Receiver readiness was not confirmed ({exc}); retrying...")
+                continue
+            status("Receiver confirmed the frequency plan; ready to send the file.")
+            return profile
     raise LiveAudioError(f"no receiver handshake completed within {timeout:g} seconds")
 
 
@@ -234,12 +320,18 @@ def negotiate_receiver(
 ) -> ToneProfile:
     """Wait for channel sounding, return candidates, and receive the final plan."""
     deadline = time.monotonic() + timeout
-    capture_duration = SOUNDING_DURATION + 0.85
+    if timeout <= 0:
+        raise ValueError("handshake timeout must be positive")
     attempt = 0
     while time.monotonic() < deadline:
+        check_cancelled()
         attempt += 1
-        status(f"Listening for sender handshake (window {attempt})...")
-        recording = record_audio(capture_duration)
+        status(f"Listening continuously for sender handshake (attempt {attempt})...")
+        # A single open stream and sliding buffer retain sweeps that cross the
+        # old fixed capture-window boundary.
+        recording = record_audio(
+            max(0.01, deadline - time.monotonic()), detect=analyze_sounding_sweep
+        )
         try:
             forward_result = analyze_sounding_sweep(recording)
             candidates = rank_candidate_profiles(forward_result)
@@ -266,24 +358,27 @@ def negotiate_receiver(
                 generate_sounding_sweep(),
             )
         )
-        play(response)
-        final_recording = record_audio(CONTROL_DURATION + 1.55)
+        _play_handshake(response)
+        final_recording = record_audio(
+            CONTROL_DURATION + 2.0,
+            detect=lambda clip: decode_control_message(clip, complete=True),
+        )
         try:
             final_message = decode_control_message(final_recording)
         except NegotiationError as exc:
             status(f"Final frequency confirmation was not received ({exc}); restarting...")
             continue
-        if final_message.kind != CONTROL_PLAN:
+        if final_message.kind not in {CONTROL_PLAN, CONTROL_FIXED_PLAN}:
             status("Received an unexpected handshake message; restarting...")
             continue
         profile = final_message.profiles[0]
-        if all(
-            abs(profile.base_frequency - candidate.base_frequency) > 1.0
-            or abs(profile.step_frequency - candidate.step_frequency) > 1.0
-            for candidate in candidates
-        ):
+        allowed = candidates if final_message.kind == CONTROL_PLAN else tuple(TONE_PROFILES.values())
+        if not any(_same_profile(profile, candidate) for candidate in allowed):
             status("Sender selected an unrecognized frequency plan; restarting...")
             continue
+        if final_message.kind == CONTROL_FIXED_PLAN:
+            status("Sender requested a fixed data band; the handshake does not validate that band.")
+        _play_handshake(encode_control_message(CONTROL_READY, (profile,)))
         status(
             f"Handshake complete at {profile.first_data_frequency / 1000:g}-"
             f"{profile.last_data_frequency / 1000:g} kHz."
@@ -298,9 +393,12 @@ def record_transmission(
     timeout: float = 30.0,
     silence_duration: float = 0.75,
     profile: ToneProfile | None = None,
+    handshake: bool = False,
     status: Callable[[str], None] = print,
 ) -> NDArray[np.int16]:
     """Listen until a LOW preamble arrives, then record until sustained silence."""
+    if handshake and profile is None:
+        raise ValueError("a handshake transmission requires the selected profile")
     pyaudio = _pyaudio()
     chunk_size = round(sample_rate * 0.020)
     audio = _audio_instance(pyaudio)
@@ -312,6 +410,15 @@ def record_transmission(
     silent_chunks = 0
     max_wait_chunks = round(timeout * sample_rate / chunk_size)
     required_silence = round(silence_duration * sample_rate / chunk_size)
+    control_history: list[NDArray[np.int16]] = []
+    control_history_limit = round((CONTROL_DURATION + 0.50) * sample_rate / chunk_size) + 1
+    control_check_interval = max(1, round(0.20 * sample_rate / chunk_size))
+    preamble_candidate: list[NDArray[np.int16]] = []
+    preamble_candidate_limit = round(5.30 * sample_rate / chunk_size)
+    low_chunks = 0
+    high_chunks = 0
+    minimum_low_chunks = max(1, round(0.060 * sample_rate / chunk_size))
+    minimum_high_chunks = max(1, round(0.040 * sample_rate / chunk_size))
     available_profiles = (profile,) if profile is not None else tuple(TONE_PROFILES.values())
     profile_labels = " or ".join(
         f"{candidate.base_frequency / 1000:g} kHz ({candidate.name})"
@@ -330,6 +437,7 @@ def record_transmission(
             )
         waited_chunks = 0
         while True:
+            check_cancelled()
             raw = stream.read(chunk_size, exception_on_overflow=False)
             chunk = np.frombuffer(raw, dtype="<i2").copy()
             if not started:
@@ -340,6 +448,63 @@ def record_transmission(
                 rolling = rolling[-5:]
                 peak = find_dominant_frequency(chunk, sample_rate)
                 rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
+                if handshake and profile is not None:
+                    # A lost READY makes the sender repeat its frequency plan.
+                    # Keep listening on the same open input stream and repeat
+                    # the acknowledgement until the file preamble arrives.
+                    control_history.append(chunk)
+                    control_history = control_history[-control_history_limit:]
+                    if waited_chunks % control_check_interval == 0:
+                        try:
+                            message = decode_control_message(
+                                np.concatenate(control_history), sample_rate, complete=True
+                            )
+                        except NegotiationError:
+                            pass
+                        else:
+                            if (
+                                message.kind in {CONTROL_PLAN, CONTROL_FIXED_PLAN}
+                                and _same_profile(message.profiles[0], profile)
+                            ):
+                                status("Frequency plan repeated; confirming receiver readiness...")
+                                _play_handshake(encode_control_message(CONTROL_READY, (profile,)))
+                                control_history.clear()
+                                preamble_candidate.clear()
+                                rolling.clear()
+                                low_chunks = high_chunks = 0
+                                continue
+
+                    # The 3–6 kHz control tones overlap low negotiated bands.
+                    # A LOW tone alone must not start a file recording: wait
+                    # for its HIGH calibration partner and retain both tones.
+                    tolerance = min(150.0, profile.step_frequency * 0.50)
+                    is_low = rms > 150 and abs(profile.base_frequency - peak) <= tolerance
+                    is_high = (
+                        rms > 150
+                        and abs(profile.high_preamble_frequency - peak) <= tolerance
+                    )
+                    if is_low:
+                        if high_chunks:
+                            preamble_candidate.clear()
+                            low_chunks = high_chunks = 0
+                        if not preamble_candidate:
+                            preamble_candidate.extend(rolling[-2:])
+                        else:
+                            preamble_candidate.append(chunk)
+                        preamble_candidate = preamble_candidate[-preamble_candidate_limit:]
+                        low_chunks += 1
+                    elif is_high and low_chunks >= minimum_low_chunks:
+                        preamble_candidate.append(chunk)
+                        high_chunks += 1
+                        if high_chunks >= minimum_high_chunks:
+                            started = True
+                            active_profile = profile
+                            captured.extend(preamble_candidate)
+                            status(f"Preamble detected ({profile.name}); receiving...")
+                    else:
+                        preamble_candidate.clear()
+                        low_chunks = high_chunks = 0
+                    continue
                 detected_profile = (
                     profile
                     if profile is not None and abs(profile.base_frequency - peak) <= 600.0
@@ -370,7 +535,7 @@ def record_transmission(
                 break
         if not started:
             raise LiveAudioError(f"no transmission detected within {timeout:g} seconds")
-    except LiveAudioError:
+    except (LiveAudioError, CancelledError):
         raise
     except Exception as exc:
         raise LiveAudioError(f"microphone capture failed: {exc}") from exc

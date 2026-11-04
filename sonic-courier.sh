@@ -12,8 +12,10 @@ Usage:
   sonic-courier.sh INPUT_FILE -e [--profile compatible|ultrasonic]
   sonic-courier.sh -d -o OUTPUT_FILE [--timeout SECONDS]
 
--e encodes, asks for confirmation, then plays through the default speaker.
+-e encodes, asks for permission to play, then waits/retries for a receiver handshake.
+--profile fixes the file's tone band; the receiver handshake is still required.
 -d listens on the default microphone and writes the received file.
+Press q during audio or Python setup tasks to cancel; use Ctrl+C for system packages.
 Run without arguments for the mobile-friendly menu.
 EOF
 }
@@ -32,10 +34,18 @@ profile_set=false
 timeout=60
 timeout_set=false
 
+exit_if_quit() {
+    case $1 in
+        q|Q) printf '%s\n' 'Cancelled.'; exit 0 ;;
+    esac
+}
+
 interactive_menu() {
     printf '\n%s\n' 'Sonic Courier'
+    printf '%s\n' 'Press q at a prompt, during audio, or during Python setup to cancel.'
+    printf '%s\n' 'Use Ctrl+C during system package installation (sudo may need a password).'
     printf '%s\n' '1) Receive a file (recommended defaults)'
-    printf '%s\n' '2) Send a file (automatic frequency handshake)'
+    printf '%s\n' '2) Send a file (wait for receiver handshake)'
     printf '%s\n' '3) Check audio devices'
     printf '%s\n' '4) Test the microphone'
     printf '%s\n' '5) Install or repair Sonic Courier'
@@ -47,19 +57,24 @@ interactive_menu() {
         1)
             printf '%s' 'Save received file as [received.bin]: '
             IFS= read -r output_file || fail 'no output filename was received'
+            exit_if_quit "$output_file"
             output_file=${output_file:-received.bin}
             printf '%s' 'Listening timeout in seconds [120]: '
             IFS= read -r timeout || fail 'no timeout was received'
+            exit_if_quit "$timeout"
             timeout=${timeout:-120}
             mode=decode
             ;;
         2)
             printf '%s' 'File to send: '
             IFS= read -r input_file || fail 'no input filename was received'
+            exit_if_quit "$input_file"
             [ -n "$input_file" ] || fail 'a file to send is required'
-            printf '%s\n' 'Frequency mode: 1) Automatic (recommended)  2) Compatible  3) Ultrasonic'
+            printf '%s\n' 'File tone band: 1) Automatic (recommended)  2) Compatible  3) Ultrasonic'
+            printf '%s\n' 'Every mode waits/retries for the receiver before sending the file.'
             printf '%s' 'Choose [1]: '
             IFS= read -r frequency_choice || fail 'no frequency mode was received'
+            exit_if_quit "$frequency_choice"
             case ${frequency_choice:-1} in
                 1) ;;
                 2) profile=compatible; profile_set=true ;;
@@ -72,6 +87,7 @@ interactive_menu() {
         4)
             printf '%s' 'Microphone test length in seconds [5]: '
             IFS= read -r timeout || fail 'no test length was received'
+            exit_if_quit "$timeout"
             timeout=${timeout:-5}
             mode=probe
             ;;
@@ -180,6 +196,7 @@ fi
 script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
 venv_python=$script_dir/.venv/bin/python
 venv_launcher=$script_dir/.venv/bin/sonic-courier
+cancellation_script=$script_dir/sonic_courier/cancellation.py
 
 run_as_root() {
     if [ "$(id -u)" -eq 0 ]; then
@@ -230,29 +247,39 @@ find_python() {
 
 install_project() {
     printf '%s\n' '[setup] Installing Sonic Courier and live-audio support...'
-    "$venv_python" -m pip install --upgrade pip \
-        && (cd "$script_dir" && "$venv_python" -m pip install --editable '.[live]') \
-        && "$venv_python" -c 'import numpy, pyaudio, sonic_courier'
+    "$venv_python" "$cancellation_script" "$venv_python" -m pip install --upgrade pip \
+        || return $?
+    (cd "$script_dir" \
+        && "$venv_python" "$cancellation_script" "$venv_python" \
+            -m pip install --editable '.[live]') || return $?
+    "$venv_python" -c 'import numpy, pyaudio, sonic_courier'
 }
 
 bootstrap_environment() {
     printf '%s\n' "[setup] Preparing Sonic Courier's local Python environment..."
     if ! find_python; then
-        install_system_dependencies || return 1
+        install_system_dependencies || return $?
         find_python || {
             printf '%s\n' 'error: Python 3.10 or newer is required' >&2
             return 127
         }
     fi
-    install_system_dependencies || return 1
-    "$python_command" -m venv --clear "$script_dir/.venv" || return 1
-    install_project || return 1
+    install_system_dependencies || return $?
+    "$python_command" "$cancellation_script" "$python_command" \
+        -m venv --clear "$script_dir/.venv" || return $?
+    install_project || return $?
     printf '%s\n' '[setup] Sonic Courier is ready.'
 }
 
 ensure_local_runner() {
     if [ -x "$venv_python" ] \
         && "$venv_python" -c 'import numpy, pyaudio' >/dev/null 2>&1; then
+        if ! "$venv_python" -c \
+            'import inspect; from sonic_courier.live import negotiate_sender; assert "profile" in inspect.signature(negotiate_sender).parameters' \
+            >/dev/null 2>&1; then
+            install_project
+            return $?
+        fi
         if [ -x "$venv_launcher" ] \
             && "$venv_launcher" send --help 2>/dev/null | grep -q -- '--confirm' \
             && "$venv_launcher" send --help 2>/dev/null | grep -q -- '--auto' \
@@ -283,7 +310,7 @@ elif [ "$mode" = probe ]; then
     run_courier probe --seconds "$timeout"
 elif [ "$mode" = encode ]; then
     if [ "$profile_set" = true ]; then
-        run_courier send "$input_file" --profile "$profile" --confirm
+        run_courier send "$input_file" --auto --profile "$profile" --confirm
     else
         run_courier send "$input_file" --auto --confirm
     fi
